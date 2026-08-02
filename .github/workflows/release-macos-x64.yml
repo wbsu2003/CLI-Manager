@@ -48,7 +48,7 @@ jobs:
           git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git 2>/dev/null || true
           TAG="${{ inputs.upstream_tag }}"
           if [ -z "$TAG" ]; then
-            TAG="$(git ls-remote --tags upstream 'refs/tags/V*' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+            TAG="$(git ls-remote --tags upstream 'refs/tags/V*' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
           fi
           test -n "$TAG" || { echo "::error::no upstream desktop tag resolved" >&2; exit 1; }
           echo "building upstream tag: $TAG"

@@ -24,14 +24,14 @@ jobs:
         shell: bash
         run: |
           # 上游最新「正式」桌面 tag
-          LATEST="$(git ls-remote --tags https://github.com/${{ vars.UPSTREAM_REPO || 'dark-hxx/CLI-Manager' }}.git 'refs/tags/V*' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          LATEST="$(git ls-remote --tags https://github.com/${{ vars.UPSTREAM_REPO || 'dark-hxx/CLI-Manager' }}.git 'refs/tags/V*' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
           if [ -z "$LATEST" ]; then
             echo "::notice::no upstream desktop V* tag found"
             echo "need_build=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # 本 fork 已构建的 *-x64 tag 列表
-          BUILT="$(git ls-remote --tags https://github.com/${{ github.repository }}.git 'refs/tags/V*-x64' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+-x64$')"
+          BUILT="$(git ls-remote --tags https://github.com/${{ github.repository }}.git 'refs/tags/V*-x64' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+-x64$' || true)"
           echo "latest upstream desktop tag : $LATEST"
           echo "fork already built x64 tags : ${BUILT:-<none>}"
           echo "upstream_tag=$LATEST" >> "$GITHUB_OUTPUT"
