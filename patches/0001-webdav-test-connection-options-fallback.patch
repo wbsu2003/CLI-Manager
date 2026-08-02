@@ -1,0 +1,59 @@
+diff --git a/src-tauri/src/webdav/mod.rs b/src-tauri/src/webdav/mod.rs
+index cfd90695..529b5991 100644
+--- a/src-tauri/src/webdav/mod.rs
++++ b/src-tauri/src/webdav/mod.rs
+@@ -97,20 +97,49 @@ impl WebDavClient {
+     }
+ 
+     pub async fn test_connection(&self) -> Result<bool, WebDavError> {
+-        let url = self.config.url.trim_end_matches('/');
++        let url = self.config.url.trim_end_matches('/').to_string();
++        let auth = self.auth_header().to_string();
+ 
+-        let response = self
++        // 部分 WebDAV 服务(如群晖)不响应根路径的 OPTIONS 探活。
++        // 先试 OPTIONS;非 2xx 时回退 PROPFIND(Depth:0)再判一次,避免把「服务不认 OPTIONS」误报成「认证失败」。
++        let options_resp = self
+             .client
+-            .request(Method::OPTIONS, url)
+-            .header(header::AUTHORIZATION, self.auth_header())
++            .request(Method::OPTIONS, &url)
++            .header(header::AUTHORIZATION, &auth)
+             .send()
+             .await
+             .map_err(|e| WebDavError {
+                 message: format!("Connection failed: {}", e),
+                 status_code: None,
+             })?;
++        let options_status = options_resp.status();
++        if options_status.is_success() {
++            return Ok(true);
++        }
+ 
+-        Ok(response.status().is_success())
++        let propfind_resp = self
++            .client
++            .request(Method::from_bytes(b"PROPFIND").expect("valid WebDAV method"), &url)
++            .header(header::AUTHORIZATION, &auth)
++            .header("Depth", "0")
++            .send()
++            .await
++            .map_err(|e| WebDavError {
++                message: format!("Connection failed: {}", e),
++                status_code: None,
++            })?;
++        let propfind_status = propfind_resp.status();
++        if propfind_status.is_success() {
++            return Ok(true);
++        }
++
++        Err(WebDavError {
++            message: format!(
++                "Authentication failed (OPTIONS {}, PROPFIND {})",
++                options_status, propfind_status
++            ),
++            status_code: Some(propfind_status.as_u16()),
++        })
+     }
+ 
+     pub async fn exists(&self, remote_path: &str) -> Result<bool, WebDavError> {

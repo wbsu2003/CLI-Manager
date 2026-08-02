@@ -58,6 +58,28 @@ jobs:
           fetch-depth: 1
           submodules: false
 
+      # fork 的功能修复以 patch 形式存放在本 fork 的 patches/ 目录(保持 fork 源码与上游零 diff);
+      # 检出上游 tag 后逐一 git apply,让构建携带 fork 自己的补丁(如 webdav 兼容性修复)。
+      - name: Checkout fork patches
+        uses: actions/checkout@v4
+        with:
+          path: .fork-patches
+          sparse-checkout: patches
+          sparse-checkout-cone-mode: true
+
+      - name: Apply fork patches
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(.fork-patches/patches/*.patch)
+          if [ ${#files[@]} -gt 0 ]; then
+            echo "applying ${#files[@]} fork patch(es): ${files[*]}"
+            git apply --whitespace=nowarn "${files[@]}"
+            git status --short
+          else
+            echo "no fork patches to apply"
+          fi
+
       - name: Patch updater channel to this fork (CI-only, not committed)
         shell: bash
         run: |
