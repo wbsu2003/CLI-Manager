@@ -75,9 +75,10 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDQjIzQzMzQTUyRjcwRDQKUldUVWNDK2xNenl5VENsL3JuUU4xdFBwRzBMbWU4NStDZ0NzdFl1bXRiblJqNEVHMjdpMFkyZUYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBNEUyMjYxRTlDM0FCMzYKUldRMnE4UHBZU0pPZWdUdXdZSENQWjVBclg3RDhSbkF5QzJMQ3lscUtnaEduUkdmenVpb1IrS0wK",
       "endpoints": [
-        "https://github.com/wbsu2003/CLI-Manager/releases/latest/download/latest.json"
+        "https://github.bwm.de5.net/CLI-Manager/releases/latest/latest.json",
+        "https://github.com/dark-hxx/CLI-Manager/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

@@ -1,21 +1,21 @@
 name: Release macOS x64
 
-# 由 sync-upstream.yml 在上游发布新版时自动触发（也可手动 workflow_dispatch）。
-# 只做一件事：在 Apple Silicon runner 上交叉编译 Intel (x86_64) dmg 并发布到本 fork 的 release。
+# 由 sync-upstream.yml 在上游发布新版时自动触发（也可手动 workflow_dispatch 指定 tag）。
+# 唯一职责：检出「上游指定正式版 tag」的精确代码，交叉编译 Intel (x86_64) dmg 并发布到本 fork。
 #
 # 设计说明：
-#  - 桌面 updater(应用内自动更新)走「本 fork 自己的通道」：tauri.conf.json 的
-#    updater.pubkey 已改为本 fork 密钥、endpoints 指向本 fork latest.json。
-#  - SSH 远程 agent 则「完全复用上游」：linux agent 二进制与架构无关，直接从上游
-#    对应正式版 release 下载打包；App 运行时验签公钥 / manifest 地址也都是编译期指向
-#    上游(见 ssh_agent_supply_chain.rs)，无需任何改动。
-#  - 不触碰上游 release.yml，避免将来同步时 merge 冲突。
+#  - 不 merge 上游进 fork master。构建直接 fetch + checkout 上游 tag 代码,因此产物版本
+#    严格等于上游正式版;fork master 相对上游只多这两个 workflow 文件,零冲突。
+#  - 桌面 updater(应用内自动更新)在构建期把 tauri.conf.json 的 updater.pubkey/endpoints
+#    临时 patch 成本 fork 的(不提交),使装好的 App 走本 fork 的 latest.json 更新通道。
+#  - SSH 远程 agent 完全复用上游:linux 二进制与 mac 架构无关,直接从上游对应 tag 的
+#    release 下载打包;App 运行时验签公钥/manifest 地址本就编译期指向上游,无需改动。
 
 on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "对应上游正式版 tag(如 V1.3.2),用于下载 ssh-agent 资产;留空则按 tauri.conf.json 版本推导"
+        description: "上游正式版 tag(如 V1.3.2);留空则自动取上游最新桌面正式 tag"
         required: false
         type: string
         default: ""
@@ -27,12 +27,48 @@ concurrency:
   group: macos-x64-release
   cancel-in-progress: false
 
+env:
+  FORK_REPO: wbsu2003/CLI-Manager
+  UPSTREAM_REPO: dark-hxx/CLI-Manager
+  FORK_UPDATER_PUBKEY: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDQjIzQzMzQTUyRjcwRDQKUldUVWNDK2xNenl5VENsL3JuUU4xdFBwRzBMbWU4NStDZ0NzdFl1bXRiblJqNEVHMjdpMFkyZUYK"
+
 jobs:
   build:
-    runs-on: macos-14   # Apple Silicon runner(免费),交叉编译 x86_64
+    runs-on: macos-14   # Apple Silicon(免费),交叉编译 x86_64
     steps:
-      - name: Checkout fork
+      - name: Checkout fork (workflows context)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve & fetch upstream release tag
+        id: vers
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git 2>/dev/null || true
+          TAG="${{ inputs.upstream_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(git ls-remote --tags upstream 'refs/tags/V*' | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          fi
+          test -n "$TAG" || { echo "::error::no upstream desktop tag resolved" >&2; exit 1; }
+          echo "building upstream tag: $TAG"
+          git fetch --depth 1 upstream "refs/tags/${TAG}:refs/tags/${TAG}"
+          git checkout "$TAG"
+          echo "upstream_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Patch updater channel to this fork (CI-only, not committed)
+        shell: bash
+        run: |
+          node -e '
+          const fs=require("fs");
+          const p="src-tauri/tauri.conf.json";
+          const c=JSON.parse(fs.readFileSync(p,"utf8"));
+          c.plugins.updater.pubkey=process.env.FORK_UPDATER_PUBKEY;
+          c.plugins.updater.endpoints=["https://github.com/${{ env.FORK_REPO }}/releases/latest/download/latest.json"];
+          fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+          '
+          echo "patched updater ->"
+          node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).plugins.updater.endpoints"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -48,23 +84,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Resolve version and upstream tag
-        id: vers
-        shell: bash
-        run: |
-          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          INPUT_TAG="${{ inputs.upstream_tag }}"
-          UPSTREAM_TAG="${INPUT_TAG:-V$VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
-          echo "Build macOS x64: app version=$VERSION, ssh-agent from upstream $UPSTREAM_TAG"
-
       - name: Download upstream SSH agent assets
         env:
           UPSTREAM_TAG: ${{ steps.vers.outputs.upstream_tag }}
         shell: bash
         run: |
-          base="https://github.com/dark-hxx/CLI-Manager/releases/download/${UPSTREAM_TAG}"
+          base="https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/${UPSTREAM_TAG}"
           dest="src-tauri/resources/ssh-agent"
           mkdir -p "$dest"
           for f in \
@@ -95,8 +120,8 @@ jobs:
           # vite build 在 macOS runner 上易 OOM,提高 Node 堆上限
           NODE_OPTIONS: "--max-old-space-size=4096"
         with:
-          # __VERSION__ 由 tauri-action 替换为 tauri.conf.json 的 version。
-          # 用 -x64 后缀避免与上游 V{ver} tag 命名空间冲突。
+          # __VERSION__ 由 tauri-action 替换为(上游 tag 的)tauri.conf.json version。
+          # -x64 后缀避免与上游 V{ver} tag 命名空间冲突。
           tagName: "V__VERSION__-x64"
           releaseName: "CLI-Manager V__VERSION__ (macOS Intel x64)"
           releaseBody: |
