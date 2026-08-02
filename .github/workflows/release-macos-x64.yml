@@ -1,0 +1,125 @@
+name: Release macOS x64
+
+# 由 sync-upstream.yml 在上游发布新版时自动触发（也可手动 workflow_dispatch）。
+# 只做一件事：在 Apple Silicon runner 上交叉编译 Intel (x86_64) dmg 并发布到本 fork 的 release。
+#
+# 设计说明：
+#  - 桌面 updater(应用内自动更新)走「本 fork 自己的通道」：tauri.conf.json 的
+#    updater.pubkey 已改为本 fork 密钥、endpoints 指向本 fork latest.json。
+#  - SSH 远程 agent 则「完全复用上游」：linux agent 二进制与架构无关，直接从上游
+#    对应正式版 release 下载打包；App 运行时验签公钥 / manifest 地址也都是编译期指向
+#    上游(见 ssh_agent_supply_chain.rs)，无需任何改动。
+#  - 不触碰上游 release.yml，避免将来同步时 merge 冲突。
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "对应上游正式版 tag(如 V1.3.2),用于下载 ssh-agent 资产;留空则按 tauri.conf.json 版本推导"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write   # 创建 release / tag
+
+concurrency:
+  group: macos-x64-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon runner(免费),交叉编译 x86_64
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust (x86_64 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve version and upstream tag
+        id: vers
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          INPUT_TAG="${{ inputs.upstream_tag }}"
+          UPSTREAM_TAG="${INPUT_TAG:-V$VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Build macOS x64: app version=$VERSION, ssh-agent from upstream $UPSTREAM_TAG"
+
+      - name: Download upstream SSH agent assets
+        env:
+          UPSTREAM_TAG: ${{ steps.vers.outputs.upstream_tag }}
+        shell: bash
+        run: |
+          base="https://github.com/dark-hxx/CLI-Manager/releases/download/${UPSTREAM_TAG}"
+          dest="src-tauri/resources/ssh-agent"
+          mkdir -p "$dest"
+          for f in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig
+          do
+            echo "fetch $f"
+            curl -fL --retry 3 --retry-all-errors -o "$dest/$f" "$base/$f"
+          done
+          for required in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig
+          do
+            test -s "$dest/$required" || { echo "missing $required" >&2; exit 1; }
+          done
+          ls -la "$dest"
+
+      - name: Build and release macOS x64
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # vite build 在 macOS runner 上易 OOM,提高 Node 堆上限
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        with:
+          # __VERSION__ 由 tauri-action 替换为 tauri.conf.json 的 version。
+          # 用 -x64 后缀避免与上游 V{ver} tag 命名空间冲突。
+          tagName: "V__VERSION__-x64"
+          releaseName: "CLI-Manager V__VERSION__ (macOS Intel x64)"
+          releaseBody: |
+            ## macOS Intel (x86_64) 构建
+
+            由 fork 自动跟踪上游正式版构建的 **Intel Mac** 版本。
+
+            ### 安装
+
+            应用未经 Apple 签名/公证。若首次打开提示「已损坏」或「无法验证开发者」,请执行:
+
+            ```bash
+            xattr -cr /Applications/CLI-Manager.app
+            open /Applications/CLI-Manager.app
+            ```
+
+            或在「系统设置 → 隐私与安全性」中点击「仍要打开」。
+
+            ### 说明
+
+            - 应用内**自动更新**由本 fork 的更新通道提供
+            - SSH 远程主机 agent 功能复用上游官方产物
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: "--target x86_64-apple-darwin"

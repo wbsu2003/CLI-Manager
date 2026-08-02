@@ -1,0 +1,81 @@
+name: Sync Upstream
+
+# 定时跟踪上游 dark-hxx/CLI-Manager 的「正式版」：一旦上游发布新的 V* 桌面 tag，
+# 就把它 merge 进本 fork 的 master（保留本 fork 的定制：updater 通道 + 这两个 workflow），
+# 然后触发 release-macos-x64.yml 构建对应版本的 macOS Intel (x64) dmg。
+#
+# 设计要点：
+#  - merge 的对象是上游最新「正式 tag」的 commit（而非 upstream/master 头），
+#    保证 fork 构建出的版本号 == 检测到的上游正式版，判定闭环、不会无限重触发。
+#  - 只 push master 分支（不 push tag），避免把上游的 V* tag 推到本 fork。
+#  - 已构建过的版本（存在 V{ver}-x64 tag）直接跳过。
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"   # 每 12 小时检查一次上游
+  workflow_dispatch: {}        # 也支持手动触发
+
+permissions:
+  contents: write   # push merge 后的 master
+  actions: write    # gh workflow run 触发构建
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream tags
+        run: |
+          git remote add upstream https://github.com/dark-hxx/CLI-Manager.git 2>/dev/null || true
+          git fetch upstream --tags --prune
+
+      - name: Detect latest upstream desktop release
+        id: detect
+        shell: bash
+        run: |
+          LATEST="$(git tag -l | grep -E '^V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          if [ -z "$LATEST" ]; then
+            echo "::notice::no upstream desktop V* tag found"
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          X64_TAG="${LATEST}-x64"
+          echo "latest upstream desktop tag: $LATEST"
+          echo "upstream_tag=$LATEST" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${X64_TAG}" >/dev/null 2>&1; then
+            echo "already built ${X64_TAG}, nothing to do"
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need build ${X64_TAG}"
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream release tag into master
+        if: steps.detect.outputs.need_build == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.detect.outputs.upstream_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge "${UPSTREAM_TAG}^{commit}" --no-edit; then
+            echo "merged ${UPSTREAM_TAG} into master"
+          else
+            echo "::error::merge conflict with upstream ${UPSTREAM_TAG}; please resolve manually"
+            git merge --abort || true
+            exit 1
+          fi
+
+      - name: Push synced master
+        if: steps.detect.outputs.need_build == 'true'
+        run: git push origin master
+
+      - name: Trigger macOS x64 build
+        if: steps.detect.outputs.need_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ steps.detect.outputs.upstream_tag }}
+        run: gh workflow run release-macos-x64.yml -f upstream_tag="${UPSTREAM_TAG}"
