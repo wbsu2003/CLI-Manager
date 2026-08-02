@@ -48,4 +48,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_TAG: ${{ steps.detect.outputs.upstream_tag }}
-        run: gh workflow run release-macos-x64.yml -f upstream_tag="${UPSTREAM_TAG}"
+        run: gh workflow run release-macos-x64.yml --repo ${{ github.repository }} -f upstream_tag="${UPSTREAM_TAG}"
