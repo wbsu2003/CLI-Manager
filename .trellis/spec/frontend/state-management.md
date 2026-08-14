@@ -72,6 +72,26 @@ useEffect(() => {
 
 **Tests**: Run `npx tsc --noEmit` and `npm run build`. Manually verify historical stats filter changes, manual refresh, empty/error states, and bucket session drilldown in the desktop app.
 
+### Convention: Realtime project aggregates use exact-scope stale-while-refresh caching
+
+**What**: The terminal realtime panel may keep a small in-memory cache for the local “today project usage” aggregate because switching tabs can start a slow history aggregation. The cache key must include the project identity, history source, parent project key, and the canonical parent/Worktree path set. A cached value is shown immediately for that exact scope while a fresh request runs in the background.
+
+**Why**: Clearing a valid aggregate on every project switch creates an avoidable blank state, but reusing one unscoped value displays another project's usage. Failed refreshes must retain the last successful value for the same scope.
+
+```tsx
+const scopeKey = JSON.stringify([projectId, source, projectKey, projectPaths]);
+const cached = todayProjectStatsCache.get(scopeKey);
+setTodayStatsState({ scopeKey, value: cached ?? null });
+```
+
+**Contracts**:
+
+- Never read a cached aggregate unless its key exactly matches the current project scope.
+- Store only successful results; a failed refresh may fall back to the previous successful result for that same key.
+- Keep realtime terminal stats on this existing component path; historical dashboard server state continues to use TanStack Query.
+
+**Tests**: Assert that the rendered scope key gates both state and cache reads, and that a failed refresh does not replace a same-scope cached result with an empty state.
+
 ---
 
 ## Patterns
@@ -475,6 +495,43 @@ const { sessions, activeSessionId } = useTerminalStore();
 ---
 
 ## Common Mistakes
+
+### Pattern: File editor workspaces follow file locations, not the active terminal
+
+**Problem**: Each project can keep its own file-editor pseudo session, but `fileExplorerStore` exposes one active project mirror. Clearing `openFiles` whenever the active terminal changes makes inactive editor tabs lose previews and unsaved content.
+
+**Solution**: Keep in-memory editor workspaces keyed by file location. Local, WSL, and Worktree contexts use the normalized path; SSH contexts use the host id and normalized remote root. Before switching the active file project, snapshot `openFiles` and `activeFilePath`; restore the target workspace into the existing active mirror.
+
+**Contracts**:
+
+- Project switching never discards open files or unsaved content and therefore must not show a discard-on-switch prompt.
+- Closing a Files side panel snapshots the active editor state. One project file-editor Tab may visit multiple locations (for example, the main checkout and its Worktrees); closing that Tab clears every cached location owned by the project id.
+- Async open/save results update their originating workspace and must not mutate the newly active project.
+- Editor workspaces are process memory only. Do not persist drafts or reopen them after app restart.
+- Remote file consumers still release on project switch; only editor file data is retained.
+- An effect that calls `openProject` must read the current project with `useFileExplorerStore.getState()` inside the effect or callback. Do not make that synchronization callback depend on the same `project` field it writes, because mounted file panels can otherwise form a render/effect feedback loop during Tab switches.
+
+```typescript
+// Wrong: switching locations destroys editor state.
+set({ project, openFiles: [], activeFilePath: null, activeFile: null });
+
+// Correct: snapshot the current mirror and restore the target location.
+const workspaces = upsertEditorWorkspace(state.editorWorkspaces, current, state.openFiles, state.activeFilePath);
+const target = findEditorWorkspace(workspaces, project);
+set({ project, openFiles: target?.openFiles ?? [], activeFilePath: target?.activeFilePath ?? null });
+
+// Correct: project synchronization reads a current snapshot without subscribing
+// the effect callback to its own write target.
+const current = useFileExplorerStore.getState().project;
+if (!isSameProjectFileContext(current, project)) await openProject(project);
+```
+
+**Tests Required**:
+
+- Switch between two local/WSL/SSH/Worktree locations and restore file order, active file, and dirty content.
+- Close active and inactive editor Tabs, including bulk Workspan close, and verify dirty confirmation and workspace cleanup.
+- Complete a file open or save after switching projects and verify the result stays in the originating workspace.
+- Keep both the Files side panel and a file-editor Tab mounted, switch terminal Tabs, and verify project synchronization does not repeatedly call `openProject`.
 
 ### Common Mistake: Reloading the file tree when only project metadata changes
 

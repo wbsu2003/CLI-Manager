@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 73
-- **Last Active**: 2026-07-31
+- **Total Sessions**: 87
+- **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~503 | Active |
+| `journal-2.md` | ~964 | Active |
 | `journal-1.md` | ~2014 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,20 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 87 | 2026-08-13 | 修复 Diff 回退确认与折叠项目交互 | `47661dcc` | `master` |
+| 86 | 2026-08-07 | 修复 Grok 会话历史路径并提交任务 | `0fc7f495` | `feat/native-provider-management` |
+| 85 | 2026-08-06 | 修复 Grok Home 隔离并恢复旧会话 | `f38bd412`, `f4ae4c5e` | `feat/native-provider-management` |
+| 84 | 2026-08-06 | 修复 Grok 供应商真实 Home 启动 | `f38bd412` | `feat/native-provider-management` |
+| 83 | 2026-08-06 | 修复 Codex 供应商启动覆盖真实 Home | `b8a41dee` | `feat/native-provider-management` |
+| 82 | 2026-08-12 | 修复历史索引压缩迁移检测 | `ad1e2a26` | `master` |
+| 81 | 2026-08-12 | 优化历史会话索引数据库体积 | `d6e10b19` | `master` |
+| 80 | 2026-08-10 | 同步 master 并发布版本 1.3.5 | `eabf83fc` | `master` |
+| 79 | 2026-08-07 | 补齐 Tab CLI 工具图标并新增 Kimi | `d6036889` | `master` |
+| 78 | 2026-08-07 | 支持 Windows 便携版与自定义数据目录 | `eafe5da3` | `master` |
+| 77 | 2026-08-07 | 修复 Tab 图标在项目 CLI 工具变更后不刷新 | `9bf48abf` | `master` |
+| 76 | 2026-08-06 | 修复 Codex 光标隐藏未生效 | `4a605543` | `master` |
+| 75 | 2026-08-06 | 新增 Codex 运行时光标隐藏开关 | `66e71e22` | `master` |
+| 74 | 2026-08-06 | 修复远程连接设置页面响应式布局 | `89c84ce2` | `master` |
 | 73 | 2026-07-31 | 修复终端光标原生显隐 | `5f562763` | `master` |
 | 72 | 2026-07-31 | 增加资源持续上涨诊断日志 | `ce3c9360` | `master` |
 | 71 | 2026-07-31 | 容忍 Hook 配置目录失效 | `0321d7a8` | `master` |

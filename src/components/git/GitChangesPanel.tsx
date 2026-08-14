@@ -20,6 +20,7 @@ import { findProjectByPath } from "../../lib/terminalProject";
 import type { GitTreeNode, GitPullStrategy, GitBranchInfo, Project } from "../../lib/types";
 import { useGitTransportLease } from "../../hooks/useGitTransportLease";
 import { GIT_BACKGROUND_REFRESH_INTERVAL_MS } from "../../lib/gitRefreshPolicy";
+import { TerminalPanelHeader } from "../terminal/TerminalPanelHeader";
 
 interface GitChangesPanelProps {
   open: boolean;
@@ -345,6 +346,13 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
     if (project.environment_type === "ssh" || !projectPath) return project;
     return project.path === projectPath ? project : { ...project, path: projectPath };
   }, [project, projectPath]);
+  const gitTreeProject = useMemo<Project | null>(() => {
+    if (!panelProject || !activeRepoPath) return panelProject;
+    if (panelProject.environment_type === "ssh") {
+      return panelProject.remote_path === activeRepoPath ? panelProject : { ...panelProject, remote_path: activeRepoPath };
+    }
+    return panelProject.path === activeRepoPath ? panelProject : { ...panelProject, path: activeRepoPath };
+  }, [activeRepoPath, panelProject]);
   const setTransport = useGitStore((state) => state.setTransport);
   const transport = useGitStore((state) => state.transport);
   const {
@@ -773,13 +781,12 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
       className={panelClassName}
       style={{ backgroundColor: TERM.bg, ...TERMINAL_PANEL_SCROLLBAR_STYLE }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 border-b px-2 py-1.5" style={{ borderColor: TERM.dim }}>
-        <span className="flex items-center gap-2 text-[11px] font-bold" style={{ color: TERM.fg }}>
-          <GitBranch size={12} strokeWidth={2} />
-          {t("git.title")}
-        </span>
-        <span className="flex items-center gap-1.5">
+      <TerminalPanelHeader
+        icon={<GitBranch size={13} strokeWidth={2} />}
+        accent={TERM.yellow}
+        title={t("git.title")}
+        actions={(
+          <>
           {/* Group By 切换下拉 */}
           <div className="relative">
             <button
@@ -888,8 +895,9 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
           >
             <RefreshCw size={11} />
           </button>
-        </span>
-      </div>
+          </>
+        )}
+      />
 
       {/* 仓库切换：项目下检测到多个 Git 仓库时展示下拉（单仓库零 UI 变化） */}
       {repositories.length > 1 && (
@@ -1040,7 +1048,7 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
                   {t("git.section.changed")}
                 </div>
                 <GitChangesTree
-                  project={project}
+                  project={gitTreeProject}
                   nodes={tree}
                   treeId="tracked"
                   onFileClick={handleFileClick}
@@ -1059,7 +1067,7 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
                   {t("git.section.untracked")}
                 </div>
                 <GitChangesTree
-                  project={project}
+                  project={gitTreeProject}
                   nodes={untrackedTree}
                   treeId="untracked"
                   onFileClick={handleFileClick}
@@ -1328,6 +1336,7 @@ export function GitChangesPanel({ open, projectPath, projectId, visible = true, 
         confirmText={t("git.confirm.revert")}
         cancelText={t("common.cancel")}
         danger
+        zIndex={220}
         onConfirm={() => {
           if (discardTarget) void discardFile(discardTarget.path, discardTarget.status);
           setDiscardTarget(null);

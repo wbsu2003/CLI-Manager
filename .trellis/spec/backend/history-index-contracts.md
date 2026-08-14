@@ -74,6 +74,131 @@ let hits = catalog::search_sessions(&roots, &query, source, project_path, limit)
 catalog::ensure_refresh(app, roots, false, false).await?;
 ```
 
+## Scenario: Compact FTS catalog schema upgrade
+
+### 1. Scope / Trigger
+
+- Trigger: changing the rebuildable `history-catalog.db` FTS storage mode or reclaiming catalog fragmentation.
+- Goal: prevent trigram index pages and repeated replacement freelist pages from growing far beyond the indexed message text.
+
+### 2. Signatures
+
+- `ensure_schema(conn: &mut SqliteConnection) -> Result<(), String>` remains the catalog schema entry point.
+- `fts_trigram_query(query: &str) -> String` creates an `AND` expression of overlapping literal trigrams.
+- Schema version advances from 5 to 6 after the FTS rebuild and metadata update complete.
+
+### 3. Contracts
+
+- Fresh catalogs create both FTS5 tables with `detail='none'` and `tokenize='trigram case_sensitive 0'`.
+- Existing v5 catalogs drop/recreate both FTS tables and their three maintenance triggers, rebuild from the ordinary message tables, then run one `VACUUM`.
+- The v5→v6 rebuild runs for `0 < user_version < 6`; catalogs reporting `user_version >= 6` must still inspect both FTS `sqlite_master.sql` definitions and rebuild when either table is missing `detail='none'`. Fresh creation must not perform a redundant rebuild or vacuum.
+- `detail='none'` cannot evaluate the existing multi-token phrase query or provide `snippet()`. Search must bind overlapping trigrams to FTS with `AND`, then apply a case-insensitive contiguous `instr()` filter against the ordinary message content and derive a bounded prefix snippet from that content.
+- Schema/version metadata is written only after all upgrade operations succeed. The catalog remains a derived cache; source history files are never modified.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Fresh catalog | Create compact FTS directly; do not rebuild/vacuum again |
+| Existing v5 catalog | Preserve message rows, rebuild both FTS tables, compact pages, advance to v6 |
+| `user_version >= 6` but either FTS table has the legacy detail mode | Rebuild both FTS tables and restore their triggers before serving the catalog |
+| English or Chinese query of at least 3 characters | Return contiguous matches with the existing result fields |
+| Query contains quotes | Escape each trigram as a bound FTS literal; never interpolate user input |
+| FTS rebuild or metadata update fails | Return the error and do not report the new schema version |
+| Normal incremental insert/update/delete | Triggers keep FTS synchronized; do not run full `VACUUM` per refresh |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `history` becomes `"his" AND "ist" AND "sto" AND "tor" AND "ory"`, then the ordinary table verifies the contiguous match.
+- Base: a three-character Chinese query is one trigram and continues to match normally.
+- Bad: use `snippet()` or bind the complete phrase directly with `detail='none'`; SQLite rejects phrase evaluation because positional detail is absent.
+- Bad: run `VACUUM` after every changed transcript; large history refreshes become blocking maintenance operations.
+
+### 6. Tests Required
+
+- Assert fresh schema triggers support Chinese and English trigram matches.
+- Build a v5 FTS schema, call `ensure_schema`, and assert `detail='none'`, message preservation, both language matches, and `user_version=6`.
+- Assert search merging still returns V2 and legacy message hits with bounded content snippets.
+- Run `cargo test history --lib`, `cargo fmt -- --check`, and `cargo check`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+WHERE history_messages_fts MATCH ?
+// bind: "history"
+// SELECT snippet(history_messages_fts, ...)
+```
+
+#### Correct
+
+```rust
+WHERE history_messages_fts MATCH ?
+  AND instr(lower(m.display_content), lower(?)) > 0
+// bind: "his" AND "ist" AND "sto" AND "tor" AND "ory"
+```
+
+## Scenario: Bound Terminal Markdown Preview Freshness
+
+### 1. Scope / Trigger
+
+- Trigger: a completed local Claude/Codex Hook turn asks the terminal Markdown preview for the exact bound `cliSessionId` before the history catalog has observed the newly written transcript.
+- Goal: the preview may wait for one targeted catalog refresh without blocking PTY output, losing the terminal background-image rendering path, or showing another session.
+
+### 2. Signatures
+
+- Frontend helper: `fetchLatestProjectSessionDetail(projectPath, prev, source, cliSessionId, options?)`.
+- Realtime options: `forceCatalogRefresh?: boolean`, `freshDetail?: boolean`, and `waitForCatalogRefresh?: boolean`.
+- Tauri command: `history_refresh_index(..., wait: boolean) -> HistoryIndexStatus`.
+
+### 3. Contracts
+
+- A bound preview lookup must match `source + cliSessionId`; a project/path miss must never fall back to an unrelated recent session.
+- `waitForCatalogRefresh=true` is reserved for the explicit bound Markdown preview and is passed to `history_refresh_index`; statistics polling keeps the default non-blocking `false` behavior.
+- The preview records its load trigger only after receiving a non-null matching detail. A catalog miss, parse error, or transport error remains retryable when the panel is opened or refreshed.
+- The preview consumes `SessionTranscriptContent` only; it must not alter xterm output, the terminal background-image wrapper, transparency, WebGL policy, or split geometry.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Exact session is already indexed | Load detail through the normal fast path. |
+| Exact session is missing and preview requests freshness | Wait for one forced catalog refresh, then retry the exact lookup. |
+| Refresh or detail loading fails | Show the existing preview error and leave the trigger uncommitted so a later open/refresh can retry. |
+| Source/session identity mismatches | Return no detail; never display another session's answer. |
+| Background image is active | Keep the existing terminal DOM/background stacking and xterm content path unchanged. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Hook completion races catalog indexing; the preview waits for the refresh and renders the final assistant message for the same session.
+- Base: the catalog already contains the session; no forced refresh is needed.
+- Bad: cache a failed hidden preload trigger and make opening the visible panel permanently reuse the failure.
+- Bad: use the project's latest session as a fallback when the bound `cliSessionId` is absent.
+
+### 6. Tests Required
+
+- Frontend source regression test: assert preview freshness passes `waitForCatalogRefresh=true`, the store forwards it as `wait`, and failed loads do not write the loaded trigger.
+- Frontend background regression test: assert the existing terminal background-enabled wrapper and xterm container remain present.
+- Run `npx tsc --noEmit` and the Markdown preview/background layout Node tests.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+loadedTriggerRef.current = trigger;
+void loadLatest();
+```
+
+#### Correct
+
+```typescript
+void loadLatest(trigger);
+// inside the successful matching-detail branch:
+loadedTriggerRef.current = trigger;
+```
+
 ## Scenario: Catalog Schema Compatibility Upgrade
 
 ### 1. Scope / Trigger

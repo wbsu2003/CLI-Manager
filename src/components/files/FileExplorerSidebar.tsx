@@ -14,15 +14,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { copyAiText } from "../../lib/aiClipboard";
-import { formatAiPathBlock, formatAiRootTree, formatAiTree, TERMINAL_FILE_PATH_MIME } from "../../lib/aiPathFormatter";
+import { formatAiRootTree, formatAiTree, TERMINAL_FILE_PATH_MIME } from "../../lib/aiPathFormatter";
 import { debugConsoleWarn } from "../../lib/debugConsole";
 import { POINTER_DRAG_START_PX } from "../../lib/dragInteraction";
 import { useI18n, type TranslationKey } from "../../lib/i18n";
 import {
   beginTerminalFileDrag,
   commitTerminalFileDragDrop,
+  createTerminalFileDragPayload,
   endTerminalFileDrag,
   getTerminalFileDropZoneIdAtPoint,
+  TERMINAL_FILE_DRAG_MIME,
   updateTerminalFileDragPointFromEvent,
 } from "../../lib/terminalFileDrag";
 import {
@@ -48,6 +50,8 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { Portal } from "../ui/Portal";
 import { ChevronRight, Copy, EyeOff, File, FileCode, Folder, FolderOpen, FolderPlus, Pencil, RefreshCw, Search, Trash2, X } from "../icons";
 import { TERM } from "../stats/termStatsUi";
+import { TerminalPanelHeader } from "../terminal/TerminalPanelHeader";
+import { PathCopyMenu } from "../PathCopyMenu";
 
 interface FileExplorerSidebarProps {
   mode?: "sidebar" | "panel";
@@ -645,9 +649,7 @@ function FileNode({
                 <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
               </ContextMenuItem>}
               <ContextMenuSeparator />
-              <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(displayEntry.path, displayEntry.kind), t("files.toast.aiPathCopied"))}>
-                <Copy size={13} /> {t("files.menu.copyAiPath")}
-              </ContextMenuItem>
+              <PathCopyMenu project={project} relativePath={displayEntry.path} kind={displayEntry.kind} />
               {isDir && (
                 <ContextMenuItem onSelect={() => void copyAiText(formatAiTree(project, displayEntry), t("files.toast.aiTreeCopied"))}>
                   <Folder size={13} /> {t("files.menu.copyAiTree")}
@@ -1288,13 +1290,14 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
 
   const handleFileDragStart = useCallback((event: ReactDragEvent<HTMLElement>, entry: ProjectFileEntry) => {
     if (!project) return;
-    const text = formatAiPathBlock(entry.path, entry.kind);
-    beginTerminalFileDrag(text);
+    const payload = createTerminalFileDragPayload(project, entry.path, entry.kind);
+    beginTerminalFileDrag(payload);
     updateTerminalFileDragPointFromEvent(event);
     event.dataTransfer.effectAllowed = "copyMove";
     event.dataTransfer.setData(FILE_EXPLORER_ENTRY_MIME, JSON.stringify({ kind: entry.kind, name: entry.name, path: entry.path }));
-    event.dataTransfer.setData(TERMINAL_FILE_PATH_MIME, text);
-    event.dataTransfer.setData("text/plain", text);
+    event.dataTransfer.setData(TERMINAL_FILE_DRAG_MIME, JSON.stringify(payload));
+    event.dataTransfer.setData(TERMINAL_FILE_PATH_MIME, payload.text);
+    event.dataTransfer.setData("text/plain", payload.text);
   }, [project]);
 
   const handleFileDrag = useCallback((event: ReactDragEvent<HTMLElement>) => {
@@ -1354,7 +1357,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
         resetPointerDrag();
         return;
       }
-      beginTerminalFileDrag(formatAiPathBlock(state.entry.path, state.entry.kind));
+      beginTerminalFileDrag(createTerminalFileDragPayload(project, state.entry.path, state.entry.kind));
       setDragPreview({
         x: event.clientX - state.preview.offsetX,
         y: event.clientY - state.preview.offsetY,
@@ -1486,9 +1489,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           {!readOnly && <ContextMenuItem onSelect={() => void openFileBrowserFolder(project.path, match.path, t)}>
             <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
           </ContextMenuItem>}
-          <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(match.path, "file"), t("files.toast.aiPathCopied"))}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath={match.path} kind="file" />
           {(() => {
             const change = getGitChange(match.path);
             return change ? (
@@ -1577,9 +1578,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
         {!readOnly && <ContextMenuItem onSelect={() => void openFileBrowserFolder(project.path, entry.path, t)}>
           <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
         </ContextMenuItem>}
-          <ContextMenuItem onSelect={() => void copyAiText(formatAiPathBlock(entry.path, entry.kind), t("files.toast.aiPathCopied"))}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath={entry.path} kind={entry.kind} />
           {entry.kind === "directory" && (
             <ContextMenuItem onSelect={() => void copyAiText(formatAiTree(project, entry), t("files.toast.aiTreeCopied"))}>
               <Folder size={13} /> {t("files.menu.copyAiTree")}
@@ -1595,11 +1594,6 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile?.path, cancelRename, getDisplayStatus, getDropTargetPath, getGitChange, handleFileDragEnd, handleFileDragOver, handleFileDragStart, handleFileDrop, handleFileKeyDown, handleFilePointerCancel, handleFilePointerDown, handleFilePointerMove, handleFilePointerUp, menuPortalContainer, openFile, project, renamingAction?.path, requestOpenDiff, submitRename, t]);
-
-  const copyRootAiPath = useCallback(() => {
-    if (!project) return;
-    void copyAiText(formatAiPathBlock("", "directory"), t("files.toast.aiPathCopied"));
-  }, [project, t]);
 
   const copyRootAiTree = useCallback(() => {
     if (!project) return;
@@ -1685,6 +1679,65 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
   const searchLabel = searchMode === "content" ? t("files.searchCodePlaceholder") : t("files.searchPlaceholder");
   const searchToggleLabel = searchControlsVisible ? t("files.hideSearch") : searchLabel;
   const displayPathName = getDisplayPathName(readOnly ? project.remote_path : project.path);
+  const hasHeaderExtras = searchControlsVisible || readOnly || Boolean(clipboard);
+  const headerActions = (
+    <>
+      <button
+        className="ui-file-tooltip ui-icon-action"
+        data-tooltip={searchToggleLabel}
+        aria-label={searchToggleLabel}
+        aria-pressed={searchControlsVisible}
+        onClick={toggleSearchControls}
+      >
+        {searchControlsVisible ? <EyeOff size={13} /> : <Search size={13} />}
+      </button>
+      <button className="ui-file-tooltip ui-icon-action" data-tooltip={t("common.refresh")} aria-label={t("files.refreshList")} onClick={() => void refresh()}>
+        <RefreshCw size={13} />
+      </button>
+      <button className="ui-file-tooltip ui-icon-action" data-tooltip={closeLabel} aria-label={closeLabel} onClick={handleClose}>
+        <X size={14} />
+      </button>
+    </>
+  );
+  const headerExtras = (
+    <>
+      {searchControlsVisible && (
+        <div className="ui-file-search-input-shell flex items-center gap-1 rounded-md border border-border bg-surface-container-lowest px-1.5">
+          <Search size={13} className="text-text-muted" />
+          <input
+            ref={searchInputRef}
+            className="min-w-0 flex-1 bg-transparent py-1 text-xs text-on-surface outline-none"
+            value={searchQuery}
+            aria-label={searchLabel}
+            placeholder={searchLabel}
+            onChange={(event) => void setSearchQuery(event.currentTarget.value)}
+          />
+          <div className="ui-file-search-mode-inline flex shrink-0 items-center gap-0.5 rounded border border-border bg-surface-container-low p-0.5">
+            {SEARCH_MODES.map((searchModeOption) => {
+              const active = searchMode === searchModeOption.value;
+              return (
+                <button
+                  key={searchModeOption.value}
+                  type="button"
+                  className={[
+                    "ui-file-search-mode-option rounded px-1.5 py-0.5 text-[10px] leading-4 transition-colors",
+                    active ? "text-on-surface" : "text-text-muted hover:text-on-surface",
+                  ].join(" ")}
+                  data-selected={active ? "true" : "false"}
+                  aria-pressed={active}
+                  onClick={() => setSearchMode(searchModeOption.value)}
+                >
+                  {t(searchModeOption.labelKey)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {readOnly && <div className="mt-1 text-[10px] text-text-muted">{t("files.readOnly")}</div>}
+      {!readOnly && clipboard && <div className="mt-1 truncate text-[10px] text-text-muted">{clipboard.mode === "copy" ? t("files.clipboard.copy") : t("files.clipboard.move")}：{clipboard.name}</div>}
+    </>
+  );
   const panelStyle = mode === "panel"
     ? ({
         "--surface-container": TERM.card,
@@ -1729,69 +1782,33 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           </div>
         </Portal>
       )}
-      <div className="shrink-0 border-b border-border px-2 py-2">
-        <div className="mb-2 flex items-center gap-2">
-          <span className="flex shrink-0" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
-            <Folder size={15} className="ui-file-explorer-root-icon" />
-          </span>
-          <div className="min-w-0 flex-1" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
-            <div className="ui-file-explorer-title truncate text-xs font-semibold">{project.name}</div>
-            <div className="ui-file-explorer-subtitle truncate text-[10px]">{displayPathName}</div>
-          </div>
-          <button
-            className="ui-file-tooltip ui-icon-action"
-            data-tooltip={searchToggleLabel}
-            aria-label={searchToggleLabel}
-            aria-pressed={searchControlsVisible}
-            onClick={toggleSearchControls}
-          >
-            {searchControlsVisible ? <EyeOff size={13} /> : <Search size={13} />}
-          </button>
-          <button className="ui-file-tooltip ui-icon-action" data-tooltip={t("common.refresh")} aria-label={t("files.refreshList")} onClick={() => void refresh()}>
-            <RefreshCw size={13} />
-          </button>
-          <button className="ui-file-tooltip ui-icon-action" data-tooltip={closeLabel} aria-label={closeLabel} onClick={handleClose}>
-            <X size={14} />
-          </button>
-        </div>
-        {searchControlsVisible && (
-          <>
-            <div className="ui-file-search-input-shell flex items-center gap-1 rounded-md border border-border bg-surface-container-lowest px-1.5">
-              <Search size={13} className="text-text-muted" />
-              <input
-                ref={searchInputRef}
-                className="min-w-0 flex-1 bg-transparent py-1 text-xs text-on-surface outline-none"
-                value={searchQuery}
-                aria-label={searchLabel}
-                placeholder={searchLabel}
-                onChange={(event) => void setSearchQuery(event.currentTarget.value)}
-              />
-              <div className="ui-file-search-mode-inline flex shrink-0 items-center gap-0.5 rounded border border-border bg-surface-container-low p-0.5">
-                {SEARCH_MODES.map((mode) => {
-                  const active = searchMode === mode.value;
-                  return (
-                    <button
-                      key={mode.value}
-                      type="button"
-                      className={[
-                        "ui-file-search-mode-option rounded px-1.5 py-0.5 text-[10px] leading-4 transition-colors",
-                        active ? "text-on-surface" : "text-text-muted hover:text-on-surface",
-                      ].join(" ")}
-                      data-selected={active ? "true" : "false"}
-                      aria-pressed={active}
-                      onClick={() => setSearchMode(mode.value)}
-                    >
-                      {t(mode.labelKey)}
-                    </button>
-                  );
-                })}
-              </div>
+      {mode === "panel" ? (
+        <>
+          <TerminalPanelHeader
+            icon={<Folder size={14} />}
+            accent={TERM.blue}
+            title={project.name}
+            subtitle={displayPathName}
+            onTitleDoubleClick={readOnly ? undefined : openProjectRootFolder}
+            actions={headerActions}
+          />
+          {hasHeaderExtras && <div className="shrink-0 border-b border-border px-2 py-2">{headerExtras}</div>}
+        </>
+      ) : (
+        <div className="shrink-0 border-b border-border px-2 py-2">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="flex shrink-0" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
+              <Folder size={15} className="ui-file-explorer-root-icon" />
+            </span>
+            <div className="min-w-0 flex-1" onDoubleClick={readOnly ? undefined : openProjectRootFolder}>
+              <div className="ui-file-explorer-title truncate text-xs font-semibold">{project.name}</div>
+              <div className="ui-file-explorer-subtitle truncate text-[10px]">{displayPathName}</div>
             </div>
-          </>
-        )}
-        {readOnly && <div className="mt-1 text-[10px] text-text-muted">{t("files.readOnly")}</div>}
-        {!readOnly && clipboard && <div className="mt-1 truncate text-[10px] text-text-muted">{clipboard.mode === "copy" ? t("files.clipboard.copy") : t("files.clipboard.move")}：{clipboard.name}</div>}
-      </div>
+            {headerActions}
+          </div>
+          {headerExtras}
+        </div>
+      )}
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
@@ -1819,9 +1836,7 @@ export function FileExplorerSidebar({ mode = "sidebar", onClosePanel, onBackToPr
           {!readOnly && <ContextMenuItem onSelect={openProjectRootFolder}>
             <FolderOpen size={13} /> {t("files.menu.openContainingFolder")}
           </ContextMenuItem>}
-          <ContextMenuItem onSelect={copyRootAiPath}>
-            <Copy size={13} /> {t("files.menu.copyAiPath")}
-          </ContextMenuItem>
+          <PathCopyMenu project={project} relativePath="" kind="directory" />
           <ContextMenuItem onSelect={copyRootAiTree}>
             <Folder size={13} /> {t("files.menu.copyAiTree")}
           </ContextMenuItem>

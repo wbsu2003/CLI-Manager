@@ -35,6 +35,11 @@ import type {
   HistoryTokenTrendPoint,
   HistoryToolEvent,
   HistoryToolCount,
+  RequestLogStatsModelItem,
+  RequestLogStatsPayload,
+  RequestLogStatsSourceItem,
+  RequestLogStatsTrendItem,
+  RequestLogSyncResult,
   PromptScope,
   Project,
   HistorySource,
@@ -312,6 +317,7 @@ function normalizeSummary(raw: unknown): HistorySessionSummary {
     project_key: asString(rec.project_key ?? rec.projectKey),
     title: asString(rec.title),
     file_path: asString(rec.file_path ?? rec.filePath),
+    parent_session_id: asString(rec.parent_session_id ?? rec.parentSessionId ?? "") || null,
     cwd: asString(rec.cwd ?? "") || null,
     created_at: asNumber(rec.created_at ?? rec.createdAt),
     updated_at: asNumber(rec.updated_at ?? rec.updatedAt),
@@ -337,9 +343,27 @@ function normalizeDetail(raw: unknown): HistorySessionDetail {
     const m = msg as Record<string, unknown>;
     const rawLineIndex = m.line_index ?? m.lineIndex;
     const rawEditableText = m.editable_text ?? m.editableText;
+    const rawParts = Array.isArray(m.parts) ? m.parts : [];
+    const parts = rawParts.flatMap((part) => {
+      if (!part || typeof part !== "object") return [];
+      const value = part as Record<string, unknown>;
+      const kind = asString(value.kind);
+      if (!["text", "tool_call", "tool_result", "reasoning", "system", "metadata", "unknown"].includes(kind)) {
+        return [];
+      }
+      const content = asString(value.content);
+      if (!content.trim()) return [];
+      return [{
+        kind: kind as NonNullable<HistoryMessage["parts"]>[number]["kind"],
+        content,
+        tool_name: asString(value.tool_name ?? value.toolName) || undefined,
+        call_id: asString(value.call_id ?? value.callId) || undefined,
+      }];
+    });
     return {
       role: normalizeRole(m.role),
       content: asString(m.content),
+      parts: parts.length > 0 ? parts : undefined,
       timestamp: asString(m.timestamp ?? "") || null,
       model: asString(m.model ?? "") || undefined,
       input_tokens: asNumber(m.input_tokens ?? m.inputTokens),
@@ -703,6 +727,15 @@ function normalizeStats(raw: unknown): HistoryStatsPayload {
     source_distribution: sourceRaw.map((item) => normalizeSourceDistribution(item)),
     project_efficiency: efficiencyRaw.map((item) => normalizeProjectEfficiency(item)),
     hourly_activity: hourlyRaw.map((item) => normalizeHourlyActivity(item)),
+    data_quality: (() => {
+      const quality = (rec.data_quality ?? rec.dataQuality ?? {}) as Record<string, unknown>;
+      return {
+        route_records: asNumber(quality.route_records ?? quality.routeRecords),
+        session_fallback_records: asNumber(quality.session_fallback_records ?? quality.sessionFallbackRecords),
+        unattributed_records: asNumber(quality.unattributed_records ?? quality.unattributedRecords),
+        missing_usage_records: asNumber(quality.missing_usage_records ?? quality.missingUsageRecords),
+      };
+    })(),
   };
 }
 
@@ -730,6 +763,10 @@ export interface TodayProjectStats {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   unpricedTokens: number;
+  routeRecords?: number;
+  sessionFallbackRecords?: number;
+  unattributedRecords?: number;
+  missingUsageRecords?: number;
 }
 
 export interface FetchHistoryStatsOptions {
@@ -741,6 +778,62 @@ export interface FetchHistoryStatsOptions {
   startAt?: number | null;
   endAt?: number | null;
   force?: boolean;
+}
+
+export interface FetchHistoryRequestLogStatsOptions {
+  sourceFilter: HistorySourceFilter;
+  projectKey?: string | null;
+  projectPath?: string | null;
+  model?: string | null;
+  startAt?: number | null;
+  endAt?: number | null;
+  force?: boolean;
+}
+
+let requestLogSyncPromise: Promise<unknown> | null = null;
+
+export async function syncHistoryRequestLogs(force = false): Promise<RequestLogSyncResult> {
+  if (requestLogSyncPromise && !force) {
+    await requestLogSyncPromise;
+    return {
+      scanned_files: 0,
+      changed_files: 0,
+      removed_files: 0,
+      written_rows: 0,
+      failed_files: 0,
+      synced_at_ms: 0,
+    };
+  }
+  const pathArgs = await getHistoryPathArgs();
+  const promise = invoke<RequestLogSyncResult>("history_sync_request_logs", {
+    ...pathArgs,
+    force,
+  });
+  requestLogSyncPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (requestLogSyncPromise === promise) requestLogSyncPromise = null;
+  }
+}
+
+export async function fetchHistoryRequestLogStats(
+  options: FetchHistoryRequestLogStatsOptions,
+): Promise<RequestLogStatsPayload> {
+  await syncHistoryRequestLogs(options.force ?? false);
+  const filters = {
+    source: normalizeSourceFilter(options.sourceFilter),
+    project_key: options.projectKey?.trim() || null,
+    project_path: options.projectPath?.trim() || null,
+    model: options.model?.trim() || null,
+    start_at: typeof options.startAt === "number" && Number.isFinite(options.startAt) ? options.startAt : null,
+    end_at: typeof options.endAt === "number" && Number.isFinite(options.endAt) ? options.endAt : null,
+  };
+  const raw = await invoke<unknown>("history_get_request_log_stats", {
+    filters,
+    ...(await getHistoryPathArgs()),
+  });
+  return normalizeRequestLogStats(raw);
 }
 
 export async function fetchHistoryStatsProjectOptions(sourceFilter: HistorySourceFilter): Promise<string[]> {
@@ -800,23 +893,26 @@ export async function fetchRemoteHistoryStatsPayload(
 // source 非空时只匹配对应 CLI（claude/codex），供按终端工具区分的场景使用。
 // 传入 prev（上次结果的 file_path/updated_at）时，若最近会话未变化则返回 "unchanged"，
 // 跳过整个 jsonl 的重新解析，供轮询场景使用。
-// forceCatalogRefresh：Hook 刚绑定 sessionId / 用量仍为 0 时后台触发扫盘索引；查询保持非阻塞。
+// forceCatalogRefresh：Hook 刚绑定 sessionId / 用量仍为 0 时触发扫盘索引。
+// waitForCatalogRefresh：需要严格绑定当前 session 的实时预览时，等待这次扫盘完成；默认不等待，保留统计轮询的非阻塞行为。
 export async function fetchLatestProjectSessionDetail(
   projectPath: string,
   prev?: { filePath: string; updatedAt: number },
   source?: HistorySource | null,
   cliSessionId?: string | null,
-  options?: { forceCatalogRefresh?: boolean; freshDetail?: boolean }
+  options?: { forceCatalogRefresh?: boolean; freshDetail?: boolean; waitForCatalogRefresh?: boolean }
 ): Promise<HistorySessionDetail | "unchanged" | null> {
   try {
     const forceCatalogRefresh = Boolean(options?.forceCatalogRefresh);
     const freshDetail = Boolean(options?.freshDetail);
+    const waitForCatalogRefresh = Boolean(options?.waitForCatalogRefresh);
     logInfo("history.realtime.lookup.start", {
       source: source ?? null,
       projectPath,
       cliSessionId: cliSessionId ?? null,
       forceCatalogRefresh,
       freshDetail,
+      waitForCatalogRefresh,
       previousFilePath: prev?.filePath ?? null,
       previousUpdatedAt: prev?.updatedAt ?? null,
     });
@@ -860,7 +956,7 @@ export async function fetchLatestProjectSessionDetail(
       if (summary?.session_id === sessionQuery) return summary;
       if (!forceCatalogRefresh) return null;
       try {
-        await invoke("history_refresh_index", { ...pathArgs, wait: false });
+        await invoke("history_refresh_index", { ...pathArgs, wait: waitForCatalogRefresh });
       } catch (error) {
         logWarn("history.realtime.lookup.refreshFailed", {
           source: source ?? null,
@@ -893,7 +989,9 @@ export async function fetchLatestProjectSessionDetail(
       });
       return null;
     }
-    if (prev && summary.file_path === prev.filePath && summary.updated_at === prev.updatedAt) {
+    const summaryChanged =
+      !prev || summary.file_path !== prev.filePath || summary.updated_at !== prev.updatedAt;
+    if (prev && !summaryChanged && !freshDetail) {
       logInfo("history.realtime.lookup.unchanged", {
         source: summary.source,
         projectPath,
@@ -909,7 +1007,7 @@ export async function fetchLatestProjectSessionDetail(
       source: summary.source,
       projectKey: summary.project_key,
       aggregateSubtasks: false,
-      fresh: freshDetail,
+      fresh: freshDetail || summaryChanged,
     });
     const detail = normalizeDetail(detailRaw);
     logInfo("history.realtime.lookup.detail", {
@@ -966,6 +1064,7 @@ export async function fetchTodayProjectStats(
   const normalizedProjectPaths = normalizeHistoryProjectPaths(projectPaths ?? []);
   const hasProjectPaths = normalizedProjectPaths.length > 0;
   try {
+    await syncHistoryRequestLogs(false);
     const raw = await invoke<unknown>("history_get_stats", {
       source: source ?? null,
       ...(await getHistoryPathArgs()),
@@ -992,6 +1091,10 @@ export async function fetchTodayProjectStats(
       cacheReadTokens: stats.total_cache_read_tokens,
       cacheCreationTokens: stats.total_cache_creation_tokens,
       unpricedTokens: stats.total_unpriced_tokens,
+      routeRecords: stats.data_quality?.route_records ?? 0,
+      sessionFallbackRecords: stats.data_quality?.session_fallback_records ?? 0,
+      unattributedRecords: stats.data_quality?.unattributed_records ?? 0,
+      missingUsageRecords: stats.data_quality?.missing_usage_records ?? 0,
     };
   } catch {
     return null;
@@ -1047,6 +1150,10 @@ export async function fetchRemoteTodayProjectStats(
       cacheReadTokens: stats.total_cache_read_tokens,
       cacheCreationTokens: stats.total_cache_creation_tokens,
       unpricedTokens: stats.total_unpriced_tokens,
+      routeRecords: stats.data_quality?.route_records ?? 0,
+      sessionFallbackRecords: stats.data_quality?.session_fallback_records ?? 0,
+      unattributedRecords: stats.data_quality?.unattributed_records ?? 0,
+      missingUsageRecords: stats.data_quality?.missing_usage_records ?? 0,
     },
   };
 }
@@ -1133,6 +1240,77 @@ export async function fetchRemoteProjectSessionSummaries(
   return {
     context,
     summaries: (raw ?? []).map((item) => normalizeSummary(item)),
+  };
+}
+
+function normalizeRequestLogStatsTrend(raw: unknown): RequestLogStatsTrendItem {
+  const rec = (raw ?? {}) as Record<string, unknown>;
+  return {
+    bucket_start_ms: asNumber(rec.bucket_start_ms ?? rec.bucketStartMs),
+    requests: asNumber(rec.requests),
+    input_tokens: asNumber(rec.input_tokens ?? rec.inputTokens),
+    output_tokens: asNumber(rec.output_tokens ?? rec.outputTokens),
+    cache_read_tokens: asNumber(rec.cache_read_tokens ?? rec.cacheReadTokens),
+    cache_creation_tokens: asNumber(rec.cache_creation_tokens ?? rec.cacheCreationTokens),
+    total_tokens: asNumber(rec.total_tokens ?? rec.totalTokens),
+    total_cost_usd: asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD),
+    unpriced_tokens: asNumber(rec.unpriced_tokens ?? rec.unpricedTokens),
+  };
+}
+
+function normalizeRequestLogStatsSource(raw: unknown): RequestLogStatsSourceItem {
+  const rec = (raw ?? {}) as Record<string, unknown>;
+  return {
+    source: asString(rec.source) as RequestLogStatsSourceItem["source"],
+    requests: asNumber(rec.requests),
+    input_tokens: asNumber(rec.input_tokens ?? rec.inputTokens),
+    output_tokens: asNumber(rec.output_tokens ?? rec.outputTokens),
+    cache_read_tokens: asNumber(rec.cache_read_tokens ?? rec.cacheReadTokens),
+    cache_creation_tokens: asNumber(rec.cache_creation_tokens ?? rec.cacheCreationTokens),
+    total_tokens: asNumber(rec.total_tokens ?? rec.totalTokens),
+    ratio: asNumber(rec.ratio),
+    total_cost_usd: asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD),
+    unpriced_tokens: asNumber(rec.unpriced_tokens ?? rec.unpricedTokens),
+  };
+}
+
+function normalizeRequestLogStatsModel(raw: unknown): RequestLogStatsModelItem {
+  const rec = (raw ?? {}) as Record<string, unknown>;
+  return {
+    model: asString(rec.model),
+    requests: asNumber(rec.requests),
+    input_tokens: asNumber(rec.input_tokens ?? rec.inputTokens),
+    output_tokens: asNumber(rec.output_tokens ?? rec.outputTokens),
+    cache_read_tokens: asNumber(rec.cache_read_tokens ?? rec.cacheReadTokens),
+    cache_creation_tokens: asNumber(rec.cache_creation_tokens ?? rec.cacheCreationTokens),
+    total_tokens: asNumber(rec.total_tokens ?? rec.totalTokens),
+    ratio: asNumber(rec.ratio),
+    total_cost_usd: asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD),
+    unpriced_tokens: asNumber(rec.unpriced_tokens ?? rec.unpricedTokens),
+  };
+}
+
+function normalizeRequestLogStats(raw: unknown): RequestLogStatsPayload {
+  const rec = (raw ?? {}) as Record<string, unknown>;
+  const trendRaw = rec.trend;
+  const sourceRaw = rec.source_distribution ?? rec.sourceDistribution;
+  const modelRaw = rec.model_distribution ?? rec.modelDistribution;
+  return {
+    range_start_at: asNumber(rec.range_start_at ?? rec.rangeStartAt),
+    range_end_at: asNumber(rec.range_end_at ?? rec.rangeEndAt),
+    granularity: asString(rec.granularity) === "hour" ? "hour" : "day",
+    total_requests: asNumber(rec.total_requests ?? rec.totalRequests),
+    total_input_tokens: asNumber(rec.total_input_tokens ?? rec.totalInputTokens),
+    total_output_tokens: asNumber(rec.total_output_tokens ?? rec.totalOutputTokens),
+    total_cache_read_tokens: asNumber(rec.total_cache_read_tokens ?? rec.totalCacheReadTokens),
+    total_cache_creation_tokens: asNumber(rec.total_cache_creation_tokens ?? rec.totalCacheCreationTokens),
+    total_tokens: asNumber(rec.total_tokens ?? rec.totalTokens),
+    cache_hit_rate: asNumber(rec.cache_hit_rate ?? rec.cacheHitRate),
+    total_cost_usd: asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD),
+    total_unpriced_tokens: asNumber(rec.total_unpriced_tokens ?? rec.totalUnpricedTokens),
+    trend: Array.isArray(trendRaw) ? trendRaw.map((item) => normalizeRequestLogStatsTrend(item)) : [],
+    source_distribution: Array.isArray(sourceRaw) ? sourceRaw.map((item) => normalizeRequestLogStatsSource(item)) : [],
+    model_distribution: Array.isArray(modelRaw) ? modelRaw.map((item) => normalizeRequestLogStatsModel(item)) : [],
   };
 }
 

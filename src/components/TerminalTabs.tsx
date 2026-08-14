@@ -57,17 +57,20 @@ import {
   type TerminalSidePanelTab,
 } from "./terminal/TerminalSidePanel";
 import { RemoteHandoffOverlay } from "./terminal/RemoteHandoffOverlay";
+import { ProviderQuickSwitchPanel } from "./terminal/ProviderQuickSwitchPanel";
 import { WorktreeFinishDialog } from "./worktree/WorktreeFinishDialog";
 import { FileExplorerSidebar } from "./files/FileExplorerSidebar";
 import { openWindowsTerminal } from "../lib/externalTerminal";
 import { normalizeDirectCodexStartupCommand, resolveProjectStartupCommand } from "../lib/projectStartupCommand";
 import { projectSupportsCapability, resolveProjectCapabilities, type ProjectCapability } from "../lib/projectCapabilities";
-import { resolveCliToolHistorySourceId } from "../lib/cliTools";
+import { resolveCliToolHistorySourceId, resolveCliToolIconKey, type CliToolIconKey } from "../lib/cliTools";
 import { resolveHistoryProjectPath } from "../lib/historyProjectPaths";
-import { parseProjectEnvVars } from "../lib/providerSwitching";
-import { Activity, Terminal, TerminalSquare, Sparkles, Plus, ListClockIcon, X, Copy, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder, FolderOpen, Hash, Check, Cpu, Cloud, Undo2 } from "./icons";
+import { resolveAgentRuntimeKind } from "../lib/agentCapabilities";
+import { parseProjectEnvVars, resolveProviderSwitchAppType } from "../lib/providerSwitching";
+import { Activity, ArrowLeftRight, Terminal, TerminalSquare, Sparkles, Plus, ListClockIcon, X, Copy, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder, FolderOpen, Hash, Check, Cpu, Cloud, Undo2 } from "./icons";
 import { WorktreeIcon } from "./WorktreeIcon";
 import { VendorIcon, inferVendor, type VendorKey } from "./VendorIcon";
+import { CliToolIcon } from "./CliToolIcon";
 import { EmptyState } from "./ui/EmptyState";
 import { useAppPrompt } from "./ui/useAppPrompt";
 import { useAppConfirm } from "./ui/useAppConfirm";
@@ -81,6 +84,7 @@ import {
   type TerminalTabCloseRequestDetail,
 } from "../lib/terminalCloseConfirm";
 import type { HistorySourceFilter, Project, TerminalScope, TerminalSession, TreeNode, WorktreeRecord } from "../lib/types";
+import type { NativeProviderAppType } from "./settings/providers/nativeProviderTypes";
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -108,6 +112,7 @@ import {
   TERMINAL_FILE_NAVIGATION_REQUEST_EVENT,
   type TerminalFileNavigationRequest,
 } from "../lib/terminalFileNavigation";
+import { consumeTerminalFileDragPanelSyncSuppression } from "../lib/terminalFileDrag";
 import {
   resolveTerminalPaneMarker,
   type TerminalPaneMarkerSettings,
@@ -443,6 +448,15 @@ function inferSessionVendor(session: TerminalSession): VendorKey | null {
   return inferVendor(`${session.startupCmd ?? ""} ${session.title}`);
 }
 
+// 无厂商归属的 CLI 工具（OpenCode / Pi / Amp 等）回退到 CLI 工具图标
+function inferSessionCliToolIcon(session: TerminalSession, project?: Project): CliToolIconKey | null {
+  return (
+    resolveCliToolIconKey(project?.cli_tool)
+    ?? resolveCliToolIconKey(session.startupCmd)
+    ?? resolveCliToolIconKey(session.title)
+  );
+}
+
 function buildProjectSplitOptions(project: Project): SplitTerminalOptions {
   const cmd = resolveProjectStartupCommand(project);
   const shell = project.shell && project.shell !== "powershell" ? project.shell : undefined;
@@ -466,6 +480,7 @@ interface SortableTabProps {
   isEditing: boolean;
   notification: TabNotificationState;
   vendor?: VendorKey | null;
+  cliToolIcon?: CliToolIconKey | null;
   worktree?: WorktreeRecord | null;
   worktreeMenuContent?: (closeMenu: () => void) => ReactNode;
   hoverInfo: TerminalTabHoverInfo;
@@ -564,6 +579,7 @@ function SortableTab({
   isEditing,
   notification,
   vendor,
+  cliToolIcon,
   worktree,
   worktreeMenuContent,
   hoverInfo,
@@ -581,7 +597,7 @@ function SortableTab({
     data: {
       type: "session",
       paneId,
-      overlay: { title, notification, vendor },
+      overlay: { title, notification, vendor, cliToolIcon },
     },
     transition: DND_SORTABLE_TRANSITION,
   });
@@ -670,11 +686,15 @@ function SortableTab({
             role="status"
             aria-label={statusLabel}
           />
-          {vendor && (
+          {vendor ? (
             <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
               <VendorIcon vendor={vendor} size={14} />
             </span>
-          )}
+          ) : cliToolIcon ? (
+            <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
+              <CliToolIcon icon={cliToolIcon} size={14} className="text-current" />
+            </span>
+          ) : null}
           {worktree && (
             <Popover open={worktreePopoverOpen} onOpenChange={setWorktreePopoverOpen}>
               <PopoverTrigger asChild>
@@ -891,6 +911,7 @@ function SortableWorkspanTab({
   title,
   notification,
   vendor,
+  cliToolIcon,
   hoverInfo,
   isActive,
   dragDisabled,
@@ -905,6 +926,7 @@ function SortableWorkspanTab({
   title: string;
   notification: TabNotificationState;
   vendor?: VendorKey | null;
+  cliToolIcon?: CliToolIconKey | null;
   hoverInfo?: TerminalTabHoverInfo;
   isActive: boolean;
   dragDisabled: boolean;
@@ -923,7 +945,7 @@ function SortableWorkspanTab({
     data: {
       type: "workspan",
       workspanId: workspan.id,
-      overlay: { title, notification, vendor },
+      overlay: { title, notification, vendor, cliToolIcon },
     },
     transition: DND_SORTABLE_TRANSITION,
   });
@@ -1013,6 +1035,10 @@ function SortableWorkspanTab({
               <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
                 <VendorIcon vendor={vendor} size={14} />
               </span>
+            ) : cliToolIcon ? (
+              <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
+                <CliToolIcon icon={cliToolIcon} size={14} className="text-current" />
+              </span>
             ) : (
               <Terminal size={14} strokeWidth={1.8} aria-hidden="true" />
             )}
@@ -1078,10 +1104,12 @@ function DragOverlayTab({
   title,
   notification,
   vendor,
+  cliToolIcon,
 }: {
   title: string;
   notification: TabNotificationState;
   vendor?: VendorKey | null;
+  cliToolIcon?: CliToolIconKey | null;
 }) {
   const tabMinWidthClass = "min-w-[92px]";
 
@@ -1096,11 +1124,15 @@ function DragOverlayTab({
         style={{ backgroundColor: TAB_NOTIFICATION_COLORS[notification], color: TAB_NOTIFICATION_COLORS[notification] }}
         aria-hidden="true"
       />
-      {vendor && (
+      {vendor ? (
         <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
           <VendorIcon vendor={vendor} size={14} />
         </span>
-      )}
+      ) : cliToolIcon ? (
+        <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
+          <CliToolIcon icon={cliToolIcon} size={14} className="text-current" />
+        </span>
+      ) : null}
       <span className="ui-terminal-tab-title min-w-0 flex-1 truncate tracking-[0.01em]">{title}</span>
       <span
         className="ui-terminal-tab-close ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-on-surface-variant"
@@ -1118,6 +1150,7 @@ interface TerminalDragOverlayData {
     title: string;
     notification: TabNotificationState;
     vendor?: VendorKey | null;
+    cliToolIcon?: CliToolIconKey | null;
   };
 }
 
@@ -1146,6 +1179,7 @@ function TerminalTabDragOverlay({
                 title={overlay.title}
                 notification={overlay.notification}
                 vendor={overlay.vendor}
+                cliToolIcon={overlay.cliToolIcon}
               />
             </div>
           </div>
@@ -1278,6 +1312,10 @@ function PaneTabBar({
     activeSessionId && paneSessionIds.includes(activeSessionId)
       ? activeSessionId
       : paneSessionIds[0] ?? null;
+  const activePaneSession = activePaneTabId
+    ? paneSessions.find((session) => session.id === activePaneTabId) ?? null
+    : null;
+  const isSubagentTranscript = activePaneSession?.kind === "subagent-transcript";
   const otherPanes = allPanes.filter((item) => item.id !== pane.id && item.sessionIds.length > 0);
   const paneFullscreenLabel = isPaneFullscreen
     ? t("terminal.toolbar.exitTerminalFullscreen")
@@ -1494,7 +1532,8 @@ function PaneTabBar({
               isActive={session.id === activeSessionId}
               isEditing={editingSessionId === session.id}
               notification={tabNotifications[session.id] ?? "none"}
-              vendor={inferSessionVendor(session)}
+              vendor={inferVendor(projectById.get(session.projectId!)?.cli_tool) ?? inferSessionVendor(session)}
+              cliToolIcon={inferSessionCliToolIcon(session, projectById.get(session.projectId!))}
               worktree={session.worktreeId ? worktreeById.get(session.worktreeId) ?? null : null}
               worktreeMenuContent={session.worktreeId && worktreeById.get(session.worktreeId) && session.projectId && projectById.get(session.projectId) ? (closeMenu) => {
                 const project = projectById.get(session.projectId!);
@@ -1664,7 +1703,7 @@ function PaneTabBar({
       )}
       {variant === "pane" && (
         <div className="ui-terminal-actions flex shrink-0 items-center">
-          {isWorkspanSplit && activePaneTabId && (
+          {!isSubagentTranscript && isWorkspanSplit && activePaneTabId && (
             <button
               type="button"
               className="ui-focus-ring ui-icon-action"
@@ -1675,17 +1714,19 @@ function PaneTabBar({
               <Undo2 size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           )}
-          <button
-            type="button"
-            className="ui-focus-ring ui-icon-action ui-action-fullscreen"
-            data-active={isPaneFullscreen ? "true" : "false"}
-            onClick={() => onTogglePaneFullscreen(pane.id)}
-            title={paneFullscreenLabel}
-            aria-label={paneFullscreenLabel}
-            aria-pressed={isPaneFullscreen}
-          >
-            {isPaneFullscreen ? <Minimize2 size={14} strokeWidth={1.8} /> : <Maximize2 size={14} strokeWidth={1.8} />}
-          </button>
+          {!isSubagentTranscript && (
+            <button
+              type="button"
+              className="ui-focus-ring ui-icon-action ui-action-fullscreen"
+              data-active={isPaneFullscreen ? "true" : "false"}
+              onClick={() => onTogglePaneFullscreen(pane.id)}
+              title={paneFullscreenLabel}
+              aria-label={paneFullscreenLabel}
+              aria-pressed={isPaneFullscreen}
+            >
+              {isPaneFullscreen ? <Minimize2 size={14} strokeWidth={1.8} /> : <Maximize2 size={14} strokeWidth={1.8} />}
+            </button>
+          )}
           {isWorkspanSplit && activePaneTabId && (
             <button
               type="button"
@@ -1895,7 +1936,7 @@ function PaneLeafView({
               <Suspense fallback={null}>
                 <FileEditorPane
                   session={session}
-                  isActive={session.id === activeSessionId}
+                  isActive={!historyActive && isLayoutVisible && session.id === activeSessionId}
                   terminalThemeBackground={terminalThemeBackground}
                   onClose={() => onCloseSessions([session.id])}
                 />
@@ -2404,6 +2445,7 @@ interface TerminalTabsProps {
   onToggleFullscreen?: () => void;
   projectScopedTerminalViewEnabled?: boolean;
   terminalScope?: TerminalScope;
+  onOpenProviderSettings?: () => void;
 }
 
 export function TerminalTabs({
@@ -2411,6 +2453,7 @@ export function TerminalTabs({
   onToggleFullscreen,
   projectScopedTerminalViewEnabled = false,
   terminalScope = ALL_TERMINALS_SCOPE,
+  onOpenProviderSettings,
 }: TerminalTabsProps = {}) {
   const { t } = useI18n();
   const { prompt, promptDialog } = useAppPrompt();
@@ -2497,9 +2540,6 @@ export function TerminalTabs({
   const terminalSidePanelSkin = useSettingsStore((s) => s.terminalSidePanelSkin);
   const updateSettings = useSettingsStore((s) => s.update);
   const openFileProject = useFileExplorerStore((s) => s.openProject);
-  const fileProject = useFileExplorerStore((s) => s.project);
-  const openFiles = useFileExplorerStore((s) => s.openFiles);
-  const closeFile = useFileExplorerStore((s) => s.closeFile);
   const revealFilePath = useFileExplorerStore((s) => s.revealPath);
   const openFileEditorPane = useTerminalStore((s) => s.openFileEditorPane);
   const sessionHistoryShortcut = useSettingsStore((s) => s.keyboardShortcuts.sessionHistory);
@@ -2533,6 +2573,7 @@ export function TerminalTabs({
   const [replayOpen, setReplayOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [systemResourcesOpen, setSystemResourcesOpen] = useState(false);
+  const [providersOpen, setProvidersOpen] = useState(false);
   const [finishTarget, setFinishTarget] = useState<{ project: Project; worktree: WorktreeRecord } | null>(null);
   const [discardTarget, setDiscardTarget] = useState<{ project: Project; worktree: WorktreeRecord } | null>(null);
   const [activeToolbarDragId, setActiveToolbarDragId] = useState<string | null>(null);
@@ -2679,6 +2720,7 @@ export function TerminalTabs({
   }, [activeSession, sessions]);
   const panelSessionId = panelSession?.id ?? null;
   const panelProject = panelSession?.projectId ? projectById.get(panelSession.projectId) ?? null : null;
+  const panelProviderAppType: NativeProviderAppType = resolveProviderSwitchAppType(panelSession, panelProject) ?? "claude";
   const panelCapabilities = resolveProjectCapabilities(panelProject);
   const panelGitSupported = panelCapabilities.git || panelProject?.environment_type === "ssh";
   const activeWorktree = useMemo(
@@ -2704,11 +2746,14 @@ export function TerminalTabs({
       singleSession,
       title: workspan.customTitle ?? singleSession?.title ?? t("terminal.workspan.title", { count: memberSessions.length }),
       notification: getWorkspanNotification(sessionIds, tabNotifications),
-      vendor: singleSession ? inferSessionVendor(singleSession) : null,
+      vendor: singleSession ? (inferVendor(projectById.get(singleSession.projectId!)?.cli_tool) ?? inferSessionVendor(singleSession)) : null,
+      cliToolIcon: singleSession
+        ? inferSessionCliToolIcon(singleSession, projectById.get(singleSession.projectId!))
+        : null,
     };
-  }), [sessions, t, tabNotifications, visibleWorkspanLayouts]);
+  }), [projectById, sessions, t, tabNotifications, visibleWorkspanLayouts]);
   const workspanTabSignature = workspanTabModels
-    .map(({ workspan, title, vendor }) => `${workspan.id}:${title}:${vendor ?? "none"}`)
+    .map(({ workspan, title, vendor, cliToolIcon }) => `${workspan.id}:${title}:${vendor ?? "none"}:${cliToolIcon ?? "none"}`)
     .join("|");
   const hiddenWorkspanTabModels = useMemo(() => {
     const hiddenIds = new Set(workspanTabOverflow.hiddenIds);
@@ -2901,6 +2946,7 @@ export function TerminalTabs({
   const replayPanelActive = sidePanelMerged ? sidePanelOpen && sidePanelTab === "replay" : replayOpen;
   const gitPanelActive = sidePanelMerged ? sidePanelOpen && sidePanelTab === "git" : gitOpen;
   const filesPanelActive = sidePanelMerged ? sidePanelOpen && sidePanelTab === "files" : filesOpen;
+  const providersPanelActive = sidePanelMerged ? sidePanelOpen && sidePanelTab === "providers" : providersOpen;
   const systemResourcesPanelActive = sidePanelMerged
     ? sidePanelOpen && sidePanelTab === "systemResources"
     : systemResourcesOpen;
@@ -2924,6 +2970,7 @@ export function TerminalTabs({
     setReplayOpen(false);
     setFilesOpen(false);
     setSystemResourcesOpen(false);
+    setProvidersOpen(false);
   }, [historyOpen, terminalSidePanelSingleOpen]);
 
   useEffect(() => {
@@ -3172,33 +3219,37 @@ export function TerminalTabs({
   }, [closeSession]);
 
   const closeSessionsWithDirtyGuard = useCallback(async (sessionIds: string[]) => {
-    const currentFileProject = useFileExplorerStore.getState().project;
-    const currentOpenFiles = useFileExplorerStore.getState().openFiles;
     const currentSessions = useTerminalStore.getState().sessions;
-    const closesCurrentFileEditor = currentSessions.some(
-      (session) => sessionIds.includes(session.id)
-        && session.kind === "file-editor"
-        && isSameProjectFileContext(currentFileProject, session.fileEditor?.project)
-    );
-    const dirtyFiles = closesCurrentFileEditor
-      ? currentOpenFiles.filter((file) => file.content !== file.savedContent)
-      : [];
+    const fileStore = useFileExplorerStore.getState();
+    const fileProjects = currentSessions
+      .filter((session) => sessionIds.includes(session.id) && session.kind === "file-editor")
+      .map((session) => session.fileEditor?.project)
+      .filter((project): project is Project => Boolean(project))
+      .filter((project, index, projects) => (
+        projects.findIndex((candidate) => candidate.id === project.id) === index
+      ));
+    const dirtyFiles = fileProjects.flatMap((project) => (
+      fileStore.getProjectEditorWorkspaces(project.id).flatMap((workspace) => (
+        workspace.openFiles
+          .filter((file) => file.content !== file.savedContent)
+          .map((file) => ({ project: workspace.project, file }))
+      ))
+    ));
 
     if (dirtyFiles.length > 0) {
       const confirmed = await confirm({
         title: t("files.editor.unsavedTitle"),
         message: t("files.editor.unsavedCloseWithFiles", {
-          files: dirtyFiles.map((file) => file.path).join("\n"),
+          files: dirtyFiles.map(({ project, file }) => `${project.name}: ${file.path}`).join("\n"),
         }),
         confirmText: t("files.editor.discard"),
         danger: true,
       });
       if (!confirmed) return;
-      dirtyFiles.forEach((file) => closeFile(file.path));
     }
 
     closeSessionIds(sessionIds);
-  }, [closeFile, closeSessionIds, confirm, t]);
+  }, [closeSessionIds, confirm, t]);
 
   const handleCloseSessions = useCallback((sessionIds: string[], anchor?: SplitPickerAnchor) => {
     const uniqueSessionIds = Array.from(new Set(sessionIds)).filter((sessionId) => sessions.some((session) => session.id === sessionId));
@@ -3252,12 +3303,13 @@ export function TerminalTabs({
   const ensureStatsPanelAllowed = useCallback(async () => {
     try {
       const settings = useSettingsStore.getState();
-      const status = await invoke<{
+      const [hookStatus, openCodeStatus] = await Promise.all([
+        invoke<{
         claude: { status: string };
         codex: { status: string };
         pi: { status: string };
         grok: { status: string };
-      }>(
+        }>(
         "hook_settings_get_status",
         {
           selectedDir: settings.claudeHookConfigDir?.trim() || null,
@@ -3267,13 +3319,21 @@ export function TerminalTabs({
           ccSwitchDbPath: settings.ccSwitchDbPath ?? undefined,
           autoRepair: settings.claudeHookBridgeEnabled && settings.claudeHookAutoRepairKnownInstalled,
         }
-      );
+        ),
+        invoke<{ status: string }>("opencode_hook_status"),
+      ]);
       const hasEnabledInstalledHook =
-        (settings.claudeHookBridgeEnabled && status.claude.status === "installed") ||
-        (settings.codexHookBridgeEnabled && status.codex.status === "installed") ||
-        (settings.piHookBridgeEnabled && status.pi.status === "installed") ||
-        (settings.grokHookBridgeEnabled && status.grok.status === "installed");
+        openCodeStatus.status === "installed" ||
+        (settings.claudeHookBridgeEnabled && hookStatus.claude.status === "installed") ||
+        (settings.codexHookBridgeEnabled && hookStatus.codex.status === "installed") ||
+        (settings.piHookBridgeEnabled && hookStatus.pi.status === "installed") ||
+        (settings.grokHookBridgeEnabled && hookStatus.grok.status === "installed");
       if (!hasEnabledInstalledHook) {
+        const currentProject = panelSession?.projectId ? projectById.get(panelSession.projectId) : null;
+        const currentAgent = resolveAgentRuntimeKind(
+          `${panelSession?.cliTool ?? ""} ${panelSession?.startupCmd ?? ""} ${panelSession?.title ?? ""} ${currentProject?.cli_tool ?? ""}`
+        );
+        if (currentAgent === "opencode") return true;
         toast.warning(t("notifications.stats.needHook"), {
           description: t("notifications.stats.needHookDescription"),
         });
@@ -3283,7 +3343,7 @@ export function TerminalTabs({
       logError("Failed to check hook status before opening terminal stats panel", err);
     }
     return true;
-  }, [t]);
+  }, [panelSession, projectById, t]);
 
   const handleToggleStatsPanel = useCallback(async () => {
     if (statsPanelActive) {
@@ -3308,6 +3368,7 @@ export function TerminalTabs({
         setReplayOpen(false);
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
       }
       setStatsOpen(true);
     }
@@ -3332,10 +3393,37 @@ export function TerminalTabs({
         setGitOpen(false);
         setReplayOpen(false);
         setFilesOpen(false);
+        setProvidersOpen(false);
       }
       setSystemResourcesOpen(true);
     }
   }, [closeHistory, sidePanelMerged, systemResourcesPanelActive, terminalSidePanelSingleOpen]);
+
+  const handleToggleProviderPanel = useCallback(() => {
+    if (providersPanelActive) {
+      if (sidePanelMerged) setSidePanelOpen(false);
+      else setProvidersOpen(false);
+      return;
+    }
+    if (terminalSidePanelSingleOpen) {
+      closeHistory();
+      setActiveWorkspaceTab("terminal");
+    }
+    if (sidePanelMerged) {
+      setSidePanelTab("providers");
+      setSidePanelOpen(true);
+    } else {
+      if (terminalSidePanelSingleOpen || window.innerWidth < 1100) {
+        setStatsOpen(false);
+        setGitOpen(false);
+        setReplayOpen(false);
+        setFilesOpen(false);
+        setSystemResourcesOpen(false);
+        setProvidersOpen(false);
+      }
+      setProvidersOpen(true);
+    }
+  }, [closeHistory, providersPanelActive, sidePanelMerged, terminalSidePanelSingleOpen]);
 
   const handleToggleGitChangesPanel = useCallback(() => {
     if (gitPanelActive) {
@@ -3362,6 +3450,7 @@ export function TerminalTabs({
         setReplayOpen(false);
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
       }
       setGitOpen(true);
     }
@@ -3392,26 +3481,21 @@ export function TerminalTabs({
         setGitOpen(false);
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
       }
       setReplayOpen(true);
     }
   }, [closeHistory, panelSession, projectById, rejectUnsupportedCapability, replayPanelActive, sidePanelMerged, terminalSidePanelSingleOpen]);
 
   const syncFilePanelProject = useCallback(async (project: Project) => {
+    const preserveCurrentFilePanel = consumeTerminalFileDragPanelSyncSuppression();
     if (rejectUnsupportedCapability(project, "files")) return false;
+    if (preserveCurrentFilePanel) return true;
     try {
-      const sameFileContext = isSameProjectFileContext(fileProject, project);
-      const dirtyFiles = openFiles.filter((file) => file.content !== file.savedContent);
-      if (!sameFileContext && dirtyFiles.length > 0) {
-        const confirmed = await confirm({
-          title: t("sidebar.toast.unsavedFileConfirm"),
-          message: t("files.editor.unsavedSwitchWithFiles", {
-            files: dirtyFiles.map((file) => file.path).join("\n"),
-          }),
-          danger: true,
-        });
-        if (!confirmed) return false;
-      }
+      const sameFileContext = isSameProjectFileContext(
+        useFileExplorerStore.getState().project,
+        project,
+      );
       if (sameFileContext) return true;
       await openFileProject(project);
       return true;
@@ -3420,7 +3504,7 @@ export function TerminalTabs({
       toast.error(t("sidebar.toast.openProjectFilesFailed"), { description: String(err) });
       return false;
     }
-  }, [confirm, fileProject, openFileProject, openFiles, rejectUnsupportedCapability, t]);
+  }, [openFileProject, rejectUnsupportedCapability, t]);
 
   const closeFilesPanel = useCallback(() => {
     if (sidePanelMerged) {
@@ -3447,6 +3531,7 @@ export function TerminalTabs({
       setGitOpen(false);
       setReplayOpen(false);
       setSystemResourcesOpen(false);
+      setProvidersOpen(false);
     }
     setFilesOpen(true);
     return true;
@@ -3513,36 +3598,47 @@ export function TerminalTabs({
     if (sidePanelMerged) return;
     const enforce = () => {
       if (!terminalSidePanelSingleOpen && window.innerWidth >= 1100) return;
-      const openPanels = [statsOpen, gitOpen, replayOpen, filesOpen, systemResourcesOpen].filter(Boolean).length;
+      const openPanels = [statsOpen, gitOpen, replayOpen, filesOpen, providersOpen, systemResourcesOpen].filter(Boolean).length;
       if (openPanels <= 1) return;
       if (statsOpen) {
         setGitOpen(false);
         setReplayOpen(false);
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
         return;
       }
       if (systemResourcesOpen) {
         setGitOpen(false);
         setReplayOpen(false);
         setFilesOpen(false);
+        setProvidersOpen(false);
+        return;
+      }
+      if (providersOpen) {
+        setGitOpen(false);
+        setReplayOpen(false);
+        setFilesOpen(false);
+        setSystemResourcesOpen(false);
         return;
       }
       if (gitOpen) {
         setReplayOpen(false);
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
         return;
       }
       if (replayOpen) {
         setFilesOpen(false);
         setSystemResourcesOpen(false);
+        setProvidersOpen(false);
       }
     };
     enforce();
     window.addEventListener("resize", enforce);
     return () => window.removeEventListener("resize", enforce);
-  }, [filesOpen, gitOpen, replayOpen, sidePanelMerged, statsOpen, systemResourcesOpen, terminalSidePanelSingleOpen]);
+  }, [filesOpen, gitOpen, providersOpen, replayOpen, sidePanelMerged, statsOpen, systemResourcesOpen, terminalSidePanelSingleOpen]);
 
   useEffect(() => {
     if (!filesPanelActive) return;
@@ -3881,6 +3977,7 @@ export function TerminalTabs({
             ? t("terminal.toolbar.closeFilesPanel")
             : t("terminal.toolbar.openFilesPanel"),
       stats: statsPanelActive ? t("terminal.toolbar.closeStatsPanel") : t("terminal.toolbar.openStatsPanel"),
+      providers: providersPanelActive ? t("terminal.toolbar.closeProvidersPanel") : t("terminal.toolbar.openProvidersPanel"),
       systemResources: systemResourcesPanelActive
         ? t("terminal.toolbar.closeSystemResourcesPanel")
         : t("terminal.toolbar.openSystemResourcesPanel"),
@@ -3979,6 +4076,17 @@ export function TerminalTabs({
           <BarChart3 size={13} strokeWidth={1.8} />
         </button>
       ),
+      providers: (
+        <button
+          onClick={handleToggleProviderPanel}
+          className="ui-focus-ring ui-icon-action ui-action-providers"
+          data-active={providersPanelActive ? "true" : "false"}
+          aria-label={providersPanelActive ? t("terminal.toolbar.closeProvidersPanel") : t("terminal.toolbar.openProvidersPanel")}
+          aria-pressed={providersPanelActive}
+        >
+          <ArrowLeftRight size={13} strokeWidth={1.8} />
+        </button>
+      ),
       systemResources: (
         <button
           onClick={handleToggleSystemResourcesPanel}
@@ -4073,6 +4181,7 @@ export function TerminalTabs({
     handleToggleGlobalFullscreen,
     handleToggleReplayPanel,
     handleToggleStatsPanel,
+    handleToggleProviderPanel,
     handleToggleSystemResourcesPanel,
     handleToolbarDragCancel,
     handleToolbarDragEnd,
@@ -4084,6 +4193,7 @@ export function TerminalTabs({
     sessionHistoryShortcutHint,
     sidePanelMerged,
     statsPanelActive,
+    providersPanelActive,
     systemResourceMonitoringEnabled,
     systemResourcesPanelActive,
     t,
@@ -4386,6 +4496,7 @@ export function TerminalTabs({
                           title={model.title}
                           notification={model.notification}
                           vendor={model.vendor}
+                          cliToolIcon={model.cliToolIcon}
                           hoverInfo={model.singleSession ? buildTerminalTabHoverInfo(model.singleSession, model.singleSession.projectId ? projectById.get(model.singleSession.projectId) : undefined) : undefined}
                           isActive={model.workspan.id === effectiveActiveWorkspanId}
                           dragDisabled={hasScopedTerminalFilter}
@@ -4627,8 +4738,10 @@ export function TerminalTabs({
               projectId={panelSession?.projectId}
               filesTabDisabled={!filePanelProject}
               systemResourcesEnabled
+              providerDefaultAppType={panelProviderAppType}
               filesPanelContent={<FileExplorerSidebar mode="panel" onClosePanel={closeFilesPanel} />}
               onTabChange={handleSidePanelTabChange}
+              onOpenProviderSettings={onOpenProviderSettings}
             />
           ) : (
             <>
@@ -4686,6 +4799,16 @@ export function TerminalTabs({
                   resizeTitle={t("terminal.panel.resizeSystemResourcesTitle")}
                 >
                   <SystemResourcesPanel open={systemResourcesOpen} embedded />
+                </ResizableTerminalPanelFrame>
+              )}
+              {providersOpen && (
+                <ResizableTerminalPanelFrame
+                  widthKey="providers"
+                  defaultWidth={TERMINAL_PANEL_WIDTH_DEFAULTS.providers}
+                  resizeLabel={t("terminal.panel.resizeProvidersLabel")}
+                  resizeTitle={t("terminal.panel.resizeProvidersTitle")}
+                >
+                  <ProviderQuickSwitchPanel open={providersOpen} defaultAppType={panelProviderAppType} onOpenSettings={onOpenProviderSettings} />
                 </ResizableTerminalPanelFrame>
               )}
             </>

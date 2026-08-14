@@ -245,14 +245,9 @@ fn post(port: &str, token: &str, body: &[u8]) -> Result<(), HookNotifyError> {
 }
 
 fn write_failure_diagnostic(source: &str, event: &str, code: &str) {
-    let Some(home) = env::var_os("USERPROFILE")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env::var_os("HOME").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-    else {
+    let Ok(log_dir) = crate::app_paths::logs_dir() else {
         return;
     };
-    let log_dir = home.join(".cli-manager").join("logs");
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }
@@ -291,6 +286,7 @@ fn diagnostic_source(value: &str) -> &'static str {
         "codex" => "codex",
         "pi" => "pi",
         "grok" => "grok",
+        "opencode" => "opencode",
         _ => "unknown",
     }
 }
@@ -376,6 +372,11 @@ fn title_for(source: &str, event: &str) -> &'static str {
         ("grok", "ToolStart") => "Grok Build tool started",
         ("grok", "ToolStop") => "Grok Build tool done",
         ("grok", _) => "Grok Build needs attention",
+        ("opencode", "SessionStart") => "OpenCode session started",
+        ("opencode", "UserPromptSubmit") => "OpenCode running",
+        ("opencode", "Stop") => "OpenCode done",
+        ("opencode", "StopFailure") => "OpenCode failed",
+        ("opencode", _) => "OpenCode needs attention",
         (_, "SessionStart") => "Claude Code session started",
         (_, "UserPromptSubmit") => "Claude Code running",
         (_, "Stop") => "Claude Code done",
@@ -501,6 +502,17 @@ mod tests {
                 "grok",
                 "PermissionRequest",
                 &input
+            ));
+        }
+    }
+
+    #[test]
+    fn opencode_events_never_enter_permission_suppression() {
+        for event in ["SessionStart", "UserPromptSubmit", "Stop", "StopFailure"] {
+            assert!(!should_suppress_codex_permission_request(
+                "opencode",
+                event,
+                &json!({})
             ));
         }
     }
