@@ -8,25 +8,27 @@
 
 This project uses **Zustand** for global stores and `tauri-plugin-store` for persistent settings (`settings.json`). Local component state via `useState` is preferred for ephemeral UI.
 
-Real state files live under `src/stores/`:
+State ownership follows the feature-first layout:
 
-- `settingsStore.ts` — user preferences (theme, font, terminal background, shortcuts), persisted
-- `terminalStore.ts` — PTY sessions, active session, splits, in-memory session overrides
-- `projectStore.ts`, `historyStore.ts`, `syncStore.ts`, `templateStore.ts`, `commandHistoryStore.ts`, `sessionStore.ts`, `updateStore.ts`
+- Application-wide persisted preferences live in `src/shared/preferences/settingsStore.ts`.
+- Feature-owned state lives under `src/features/<domain>` next to its consumers.
 
-(Filling status: spec captures only patterns we have hit in practice. Other sections remain "To be filled by the team".)
+This file records only state patterns verified in the current codebase.
 
 ---
 
 ## State Categories
 
-(To be filled by the team)
+- Feature-owned state lives under `src/features/<domain>` next to its consumers.
+- Application-wide persisted preferences live in `src/shared/preferences/settingsStore.ts`.
 
 ---
 
 ## When to Use Global State
 
-(To be filled by the team)
+- Keep transient interaction state local to its component.
+- Use a domain store when several components in one feature share lifecycle state.
+- Use shared preferences only for settings consumed across feature boundaries.
 
 ---
 
@@ -173,6 +175,74 @@ entries.lowMemoryMode =
 
 - Run `npx tsc --noEmit` after adding the setting.
 - Manual smoke: toggle the setting, restart the app, and verify the value persists.
+
+## Scenario: Project pin preference and sidebar projection
+
+### 1. Scope / Trigger
+
+- Trigger: Adding a project-level pin shortcut that is persisted in shared settings, included in preference backup/sync, and projected into the project sidebar.
+- The pin relationship belongs to the preference layer and is rendered from the current project collection; it does not become a second project record.
+
+### 2. Signatures
+
+- `pinnedProjectIds: string[]` — persisted project IDs in user-selected order.
+- `sidebarPinnedSectionCollapsed: boolean` — persisted disclosure state, default `false`.
+- `migratePinnedProjectIds(value: unknown): string[]` — pure list migration and normalization.
+- `usePinnedProjects(projects: Project[], projectStoreLoaded: boolean)` — derives valid projects and exposes pin/disclosure actions.
+- `SETTING_BACKUP_POLICY.pinnedProjectIds` and `SETTING_BACKUP_POLICY.sidebarPinnedSectionCollapsed` — both map to the `preferences` backup domain.
+
+### 3. Contracts
+
+- `pinnedProjectIds` accepts strings only, removes duplicates while preserving the first occurrence, and appends newly pinned IDs to the end.
+- The derived `pinnedProjects` list joins IDs against the current `Project[]` and preserves persisted order. Unknown IDs are omitted from rendering and cleaned after both settings and the project store are loaded.
+- The pin list is not stored in `Project`, the `projects` table, or tree `sort_order`; project rename, move, and configuration changes therefore keep the same relationship.
+- Workspace restoration refreshes the project cache before applying preferences that contain `pinnedProjectIds`.
+- The sidebar filter control remains governed by `sidebarProjectFilterVisible` and defaults to hidden. Existing pin data must not force the control to appear.
+- The expanded “Pinned” section is a virtual folder-like group. It renders only when the derived list is non-empty; its children are the pinned projects and are excluded from the ordinary sortable tree. The explicit `pinned` filter may show a localized empty state when no valid pin remains.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Missing, non-array, or malformed pin setting | Use an empty list after migration. |
+| Duplicate string IDs | Keep the first occurrence and its order. |
+| Pin ID absent from the loaded project collection | Omit it from the derived list; persist cleanup after loading completes. |
+| No valid pinned project | Do not render the virtual pinned folder. |
+| Filter visibility setting is `false` | Keep the three-state filter row hidden, regardless of pin count. |
+| Snapshot includes workspace and preferences | Refresh projects before applying pinned IDs. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `pinnedProjectIds` stores stable IDs, the hook derives current project objects, and the UI renders a non-empty folder-like shortcut group.
+- Base: An old settings file has no pin keys; defaults produce no pinned group and no filter row.
+- Bad: Add a `pinned` field to each project or force `sidebarProjectFilterVisible` to `true` whenever a pin exists; both duplicate ownership and alter an unrelated user preference.
+
+### 6. Tests Required
+
+- Assert `migratePinnedProjectIds` handles missing values, non-arrays, duplicates, non-string entries, and order preservation.
+- Run `npx tsc --noEmit`, `npm run build`, `npm run check:architecture`, and `npm run check:architecture -- --strict`.
+- Manually verify pin/unpin persistence, project rename/move/delete cleanup, preference restore/sync, no-pin folder absence, one-or-more-pin folder rendering, filter setting off/on, expanded/collapsed sidebar, search, keyboard actions, and zh-CN/en-US labels.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```tsx
+const showFilter = sidebarProjectFilterVisible || pinnedProjects.length > 0;
+return <SidebarHeader showProjectFilter={showFilter} />;
+```
+
+#### Correct
+
+```tsx
+const showFilter = sidebarProjectFilterVisible;
+return (
+  <>
+    <SidebarHeader showProjectFilter={showFilter} />
+    {pinnedProjects.length > 0 && <PinnedProjectSection projects={pinnedProjects} />}
+  </>
+);
+```
 
 ### Pattern: Legacy key remapping next to the migration
 
@@ -492,6 +562,45 @@ const { sessions, activeSessionId } = useTerminalStore();
 - Type-check after selector changes.
 - Manual profiling for toolbar/sidebar components during high-frequency terminal or transcript updates; unrelated components should not rerender each tick.
 
+### Pattern: Workspace layout keeps dock positions separate from visibility
+
+**Problem**: The project sidebar and terminal auxiliary region are both side regions, but they have different state owners. Treating their visibility or position as one toggle makes it impossible to compose layouts such as `auxiliary panel | terminal | project sidebar`, and a Workspan visibility button can appear to succeed when no Workspan tab exists to render.
+
+**Solution**: Keep the layout dimensions in the persisted `workspaceLayout` object while retaining local ownership of sidebar width/collapse and terminal panel content state.
+
+```typescript
+interface WorkspaceLayoutSettings {
+  version: 3;
+  projectSidebarSide: "left" | "right";
+  terminalSidePanelSide: "left" | "right";
+  terminalSidePanelVisible: boolean;
+  workspanTabBarPosition: "top" | "bottom";
+  workspanTabBarVisible: boolean;
+}
+```
+
+**Contracts**:
+
+- `migrateWorkspaceLayout(value: unknown)` validates every field and migrates old/missing values to project-sidebar-left, auxiliary-panel-right, Workspan-top, with both visibility flags `true`.
+- `App` uses `projectSidebarSide` only to change the flex order of the project sidebar and terminal main area. It must not move or recreate a PTY, pane tree, terminal panel, or history workspace.
+- A right-docked project sidebar mirrors its separator, collapse affordance, and width-resize calculation to the edge facing the terminal; `sidebarWidth` and collapse state remain the existing `Sidebar` state.
+- `terminalSidePanelSide` independently controls the auxiliary panel frames. Its action rail follows the same side and sits on the outer edge, remaining the entry point for restoring a hidden auxiliary region; side-opening popovers must follow the action rail.
+- The Workspan quick control and menu action are disabled when Workspan is disabled or `terminalStore.workspans` is empty; a disabled action must not persist a visibility change that has no rendered effect.
+- Layout updates use `updateWorkspaceLayout(current, patch)` and the existing `settingsStore.update("workspaceLayout", ...)` path. No database, IPC, or PTY contract is added.
+
+**Good/Base/Bad Cases**:
+
+- Good: choose project sidebar right and auxiliary panel left; the visible order is action rail, auxiliary panel, terminal center, project sidebar, and both widths remain adjustable from their terminal-facing edges.
+- Base: default layout is project sidebar left and auxiliary panel right; existing terminal sessions and panel contents behave unchanged.
+- Bad: reverse only the DOM order while leaving the project sidebar resize math and right-edge handle unchanged, because dragging the right-docked sidebar would change the width in the wrong direction.
+- Bad: toggle `workspanTabBarVisible` while no Workspan exists, because the UI reports a successful state change without any visible result.
+
+**Tests Required**:
+
+- Static contract tests assert layout migration, App order wiring, right-docked resize direction, mirrored header controls, and independent menu actions.
+- Run `node --test scripts/projectSidebarDocking.test.mjs scripts/workspaceLayoutState.test.mjs scripts/workspaceLayoutControls.test.mjs`.
+- Run `npx tsc --noEmit` and `npm run build`; manually verify left/right combinations, collapsed/expanded width behavior, no-Workspan disabled feedback, settings/history opaque surfaces, and both background-fill modes.
+
 ---
 
 ## Common Mistakes
@@ -532,6 +641,57 @@ if (!isSameProjectFileContext(current, project)) await openProject(project);
 - Close active and inactive editor Tabs, including bulk Workspan close, and verify dirty confirmation and workspace cleanup.
 - Complete a file open or save after switching projects and verify the result stays in the originating workspace.
 - Keep both the Files side panel and a file-editor Tab mounted, switch terminal Tabs, and verify project synchronization does not repeatedly call `openProject`.
+
+### Pattern: File-tab batch close keeps ordering in the view and draft safety in the pane
+
+**Problem**: A file-tab context menu needs the current visual order for “close others/left/right”, but `fileExplorerStore.closeFile` owns active-file fallback. Closing a clean prefix before discovering a dirty file silently changes the workspace before the user can cancel.
+
+**Solution**: `FileEditorTabs` derives ordered target paths from its rendered `files` array and passes them to `FileEditorPane`. The Pane filters the current visible workspace, snapshots target and dirty paths, and only invokes `closeFile` after no draft is involved or after the user chooses Save/Discard.
+
+```tsx
+const leftPaths = files.slice(0, index).map((file) => file.path);
+const dirtyPaths = targetFiles
+  .filter((file) => file.content !== file.savedContent)
+  .map((file) => file.path);
+
+if (dirtyPaths.length > 0) {
+  setPendingAction({ closePane: false, paths: targetPaths, dirtyPaths });
+  return;
+}
+targetPaths.forEach(closeFile);
+```
+
+**Contracts**:
+
+- File-tab menus operate only on ordinary `ActiveProjectFile` tabs in the active file location. They never include pinned Git Diff tabs, terminal sessions, Workspans, or another cached editor workspace.
+- “Others” excludes the clicked path; “left” and “right” follow the rendered file-tab order. Actions with an empty target are disabled.
+- A target set with one or more dirty files opens one confirmation before any target is closed. Save writes only the selected dirty paths; Discard closes only selected paths; Cancel leaves every selected path unchanged.
+- Keep `fileExplorerStore.closeFile` as the only close mutation so its existing active-file fallback and workspace behavior remain authoritative. Do not add a parallel bulk-close store implementation.
+- SSH remains read-only: the menu itself does not invoke remote mutation, and any existing save failure continues to leave the confirmation state intact.
+
+**Tests Required**:
+
+- Static regression coverage asserts all four file-specific i18n actions, target ordering, empty-target disabling, batch dirty handoff, and absence of terminal menu keys.
+- Manually verify clean and dirty batches in local/WSL/SSH/Worktree locations, a split file-editor Pane, and alongside pinned Git Diff tabs in `zh-CN`, `zh-TW`, and `en-US`.
+
+### Pattern: File refresh ownership follows the editor workspace lifecycle
+
+**Problem**: A file editor can remain mounted after its Files side panel or embedded file panel is hidden. Owning watcher setup, fallback polling, or focus refresh in the conditional panel silently stops clean-file refresh while the editor is still visible.
+
+**Solution**: Mount one nonvisual project-file refresh controller with `App`. It owns local watcher start/stop, WSL watcher-failure polling, changed-path debounce, and focus/visibility refresh. `fileExplorerStore.refreshVisibleState` remains the only single-flight queue and the authority for preserving dirty drafts.
+
+**Contracts**:
+
+- Local and WSL projects prefer `project-files-changed`; watcher failure falls back to the existing low-frequency interval. The controller passes changed paths through instead of forcing a full tree reload.
+- SSH has no watcher. Poll only when its validated remote file context exists and the active workspace has opened files; automatic list/read calls are silent, while explicit user list/open/search calls retain background-operation feedback.
+- SSH refresh must continue to fail closed when the remote context is absent. It never calls local `file_*` commands for an SSH project.
+- A dirty file (`content !== savedContent`) remains a local draft after every automatic trigger. A clean file reloads only when its `modifiedMs` or `sizeBytes` changed.
+- Sidebar-local state such as the `.gitignore` matcher may retain its own lightweight event listener, but must not own watcher or refresh lifecycle.
+
+**Tests Required**:
+
+- Hide the Files panel with an editor still open, then verify local/WSL clean-file refresh, dirty-draft preservation, and watcher cleanup on project change.
+- Verify SSH context gating, 15-second quiet polling, focus refresh, and no local-path fallback.
 
 ### Common Mistake: Reloading the file tree when only project metadata changes
 
@@ -575,3 +735,55 @@ set((state) => ({
 ```
 
 **Prevention**: For file-tree move/copy/rename/delete flows, check whether the refreshed path can be root or an ancestor of an expanded folder. If yes, avoid intermediate `set()` calls that temporarily drop descendant children.
+
+### Common Mistake: Treating an empty disclosure set as invalid
+
+**Symptom**: Clicking the last expanded item in a timeline immediately opens it again, or expanding one item closes another.
+
+**Cause**: The UI models an accordion with one nullable ID and treats `null` as a synchronization error whenever data exists. An empty set is a valid user choice, and independent disclosures cannot be represented by one ID.
+
+**Fix**: For AI Replay timeline turns, keep the expanded IDs in a `Set<string>`. Toggle only the clicked ID, preserve the set across live model updates, and intersect it with the current turn IDs to remove stale entries. Seed the first turn only during the initial data population; never use an empty set as a reason to auto-open a turn later.
+
+**Tests Required**:
+
+- Verify one expanded turn can be collapsed, all turns can remain collapsed, and any turn can be reopened.
+- Verify multiple turns stay expanded independently while replay data updates.
+- Verify session remounts and model replacement remove IDs for turns that no longer exist without forcing a replacement turn open.
+
+### Pattern: Terminal layout lock guards user actions at both UI and store boundaries
+
+**Scope / Trigger**: Adding a terminal drag, split, merge, detach, unsplit, or divider resize entry point.
+
+**Signatures**:
+- `Settings.terminalLayoutLocked: boolean` defaults to false; loading accepts only literal true.
+- `isTerminalLayoutLocked(): boolean` reads the latest preference.
+- `guardTerminalLayoutChange(): boolean` returns true when blocked and supplies a deduplicated toast with Unlock.
+- `setTerminalLayoutLocked(locked: boolean): void` uses existing settings persistence; the flag is excluded from cloud backup/sync.
+
+**Contracts**:
+- Both Workspan and Pane sortable sources disable dragging while locked; click, close, rename, keyboard navigation and terminal input remain available. Drag disablement must not advertise a locked tab itself as disabled to assistive technology.
+- `observeLockedLayoutDrag` observes one primary-button pointer gesture. It notifies only after the existing drag distance is exceeded and cleans up on pointer release/cancel, blur or unmount; ordinary clicks never notify.
+- Store guards cover `reorderWorkspans`, `restoreWorkspanToSinglePane`, `mergeWorkspanAtPaneEdge`, `reorderSessions`, `moveSessionToPane`, `detachSessionToWorkspan`, `splitSessionToPaneEdge`, `splitPaneEmpty`, `splitTerminal`, `unsplitTerminal`, and `setSplitRatio`. These actions are shared by menus, command palette, shortcuts and sidebar entry points.
+- Async `splitTerminal` rechecks before committing the new layout. If locked during creation, unsubscribe/close the new PTY and release provider/extension snapshots. Never close the source session.
+- Locking during an active gesture clears tab drop previews and hover timers. Divider previews revert to the saved ratio and remove listeners without committing a resize.
+- Tab context-menu events explicitly stop propagation; the outer whitespace trigger excludes tab/workspan targets, independently of DnD disabled state. Lock/unlock menu items are text-only.
+- The small lock uses terminal tab-control CSS. The lock toast and its action retain the default application notification styling without terminal theme overrides.
+- Tabs and tab-strip whitespace offer the context-menu toggle. Only locked layouts display a small unlock button: the visible Workspan strip owns it; without that strip, the current visible Pane owns it. Hidden top strips must leave a Pane strip available even for one session.
+- Closing, normal tab creation, session restoration and process lifecycle are allowed; this is not an immutable session/layout snapshot. Project tree, file drops, provider sorting, sidebar sizing and Workspan-mode configuration are separate controls.
+
+**Validation / Error Matrix**:
+
+| State | Expected behavior |
+| --- | --- |
+| Unlocked | Existing layout controls work; no lock indicator |
+| Locked + click | Switch tab, no notification |
+| Locked + intentional drag/split | No layout mutation; one notification with Unlock |
+| Lock during divider drag | Preview rolls back, listener/RAF cleanup, no persisted ratio change |
+| Lock during async split | New PTY/snapshots cleaned; existing sessions unchanged |
+| Missing/invalid stored value | Unlocked |
+
+**Good / Base / Bad Cases**: Good: source disablement plus store guard and async recheck. Base: unlock through the small indicator/menu/toast and repeat the operation. Bad: suppress only `onDragEnd`, leaving misleading drag previews and shortcut-based splits active.
+
+**Tests Required**: `node --test scripts/terminalLayoutLock.test.mjs` executes real store action bodies, pointer observers and divider handlers with isolated dependencies. Cover unlocked persistence, all guarded actions, async cancellation, gesture cleanup, no idle indicator and both unlock entries. Run `node --test scripts/terminalLayoutLock.browser.test.mjs` for real Radix/DnD menu ownership and mixed app/terminal theme regressions in zh-CN/en-US, plus existing Workspan/layout regressions, TypeScript and strict architecture checks.
+
+**Wrong vs Correct**: Wrong: change the shared 3px constant to solve only terminal-tab misdrags, affecting project/file/provider interactions. Correct: keep shared thresholds stable and enforce the explicit user layout-lock preference at terminal-owned boundaries.

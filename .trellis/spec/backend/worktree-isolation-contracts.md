@@ -71,6 +71,13 @@ pub async fn git_worktree_merge(
 ) -> Result<GitWorktreeMergeResult, String>
 
 #[tauri::command]
+pub async fn git_worktree_force_merge(
+    project_path: String,
+    branch: String,
+    base_branch: String,
+) -> Result<GitWorktreeMergeResult, String>
+
+#[tauri::command]
 pub async fn git_worktree_remove(
     project_path: String,
     worktree_path: String,
@@ -101,6 +108,10 @@ interface GitWorktreeMergeResult {
   conflictFiles: string[];
   skipped: boolean;
   skipReason: string | null;
+  stashCreated: boolean;
+  stashRestored: boolean;
+  stashReference: string | null;
+  stashRestoreConflictFiles: string[];
 }
 ```
 
@@ -177,9 +188,13 @@ type TreeNode =
 
 - MVP finish flow commits all worktree changes, merges the worktree branch back into the base branch, then removes the worktree and optionally deletes the branch.
 - Before merge, the main project checkout must be clean. Dirty main checkout returns a stable error and performs no Git mutation.
+- The explicit force-merge command is the only path allowed to handle a dirty main checkout. After branch and content validation, it saves staged, unstaged, and untracked changes with `git stash push --include-untracked`, records the newly created stash OID, merges, and applies that exact OID with `--index`; it never drops the stash.
+- Force merge must serialize with ordinary merge in the process. A stash-save, checkout, merge, abort, or restore failure must stop cleanup and return a stable `force_merge_*` error with the retained stash OID when available.
+- A successful merge is cleanup-safe only when no stash was created or `stashRestored=true`. A stash-restore conflict returns `stashRestoreConflictFiles` (which may be empty when Git only reports raw output), retains the stash and Worktree, and does not roll back the already completed merge.
 - The merge command receives both `branch` and `baseBranch`; if the checkout is clean but not on the base branch, it may checkout the base branch before merging.
 - If the worktree branch and base branch have no content diff, the merge command must return `skipped=true` / `skipReason="no_diff"` and avoid checkout/merge mutation. The frontend should present this as "merge not needed" and still allow cleanup.
-- Merge conflicts must be detected, conflict files returned, and `merge --abort` executed immediately. Do not leave the main checkout in a half-merged state.
+- Main-checkout merge conflicts must be detected, conflict files returned, and `merge --abort` attempted immediately. Report successful recovery only after abort succeeds and the recorded baseline is verified. Abort/restore failure must retain the recovery record and block further merge/cleanup; never erase an unknown state to satisfy a clean-checkout assertion.
+- App-owned conflict resolution in the isolated Worktree follows [Worktree Conflict Resolution Contracts](./worktree-conflict-resolution-contracts.md). Its deliberate merge state is separate from main-checkout recovery; closing the UI must not abort it.
 - Stable backend error codes such as `dirty_main_worktree` are for the frontend contract, not end-user copy. The finish-task dialog must map dirty-main and merge-conflict states to readable guidance that says what happened, whether Git mutated the main checkout, and what the user should do next.
 - Cleanup may delete a non-empty directory only when `git worktree list --porcelain` still records the same path and branch. If Git records the path/branch but `git worktree remove --force` reports a stale checkout such as `is not a working tree` or missing `.git`, the backend may remove that registered path, run `git worktree prune`, and then delete the `wt/` branch.
 - Branch deletion is allowed only for `wt/` branches and only after explicit UI confirmation or successful finish flow.
@@ -196,11 +211,14 @@ type TreeNode =
 | Same project/root/task creation already in flight | Return `worktree_create_in_progress` locally; do not issue another Git command or show an unhandled Promise rejection. |
 | Worktree path already exists | Return `worktree_path_exists`; frontend must not reuse silently. |
 | Main checkout dirty before merge | Return `dirty_main_worktree`; no checkout/merge happens. |
+| Force merge stash cannot be created or verified | Return `force_merge_stash_failed` / `force_merge_stash_reference_failed` / `force_merge_stash_incomplete`; do not checkout, merge, or cleanup; retain any created stash. |
+| Force merge checkout/merge/abort fails | Attempt to restore the exact retained stash when safe; return the corresponding `force_merge_checkout_failed`, `force_merge_failed`, `force_merge_abort_failed`, or `force_merge_restore_failed`; keep the Worktree. |
+| Force merge stash apply conflicts after merge | Return `merged=true`, `stashRestored=false`, and `stashRestoreConflictFiles` when available; keep the retained stash and Worktree, and block cleanup. |
 | Worktree branch has no content diff from base branch | Return skipped `no_diff`; no checkout/merge happens; cleanup remains available. |
 | Merge branch missing | Return `branch_not_found`; no cleanup happens automatically. |
-| Merge conflict | Return conflict error with `conflictFiles`, run `merge --abort`, keep worktree record. |
+| Main-checkout merge conflict | Run `merge --abort` and verify recovery before reporting restored state; retain `conflictFiles` and the Worktree record. Abort/restore failure blocks further merge/cleanup with a persistent recovery record. |
 | Frontend receives `dirty_main_worktree` | Show human-readable text: main worktree has uncommitted changes, no merge ran, the Worktree commit is still safe, and the user should clean/commit/stash the main checkout before retrying. |
-| Frontend receives merge conflict result | Show human-readable text: merge was aborted automatically, main checkout returned to pre-merge state, and list `conflictFiles` when present. |
+| Frontend receives merge conflict result | Say the main checkout was restored only when the backend proves it; otherwise show the recovery reason and recheck action while dangerous actions remain disabled. List `conflictFiles` when present. |
 | Remove path not listed in `git worktree list --porcelain` and path is non-empty | Return `worktree_not_registered`; do not delete filesystem path. |
 | Remove path not listed in `git worktree list --porcelain` and path is empty | Remove the empty stale directory and delete the requested `wt/` branch only when requested. |
 | Remove path listed with matching branch but Git reports missing `.git` / `is not a working tree` | Treat as registered stale worktree: remove the registered directory, run `worktree prune`, and delete the requested `wt/` branch only when requested. |
@@ -231,6 +249,7 @@ type TreeNode =
   - dependency detection returns the expected command for npm/pnpm/yarn fixtures and no prompt when dependency directories exist.
   - stale worktree directory cleanup retries transient Windows file-lock errors such as `os error 32`.
   - remove/merge helpers reject non-`wt/` branches and branch/path mismatches where feasible.
+  - force merge preserves staged, unstaged, and untracked main-worktree changes, keeps an existing stash intact, switches from a non-base branch safely, aborts merge conflicts, and reports stash-restore conflicts without cleanup.
   - create error formatting keeps a final `fatal`/`error` line after long checkout progress.
 - Frontend static checks:
   - `npx tsc --noEmit` must pass after adding `WorktreeRecord`, `TreeNode` union changes, and `TerminalSession.worktreeId`.
@@ -246,7 +265,8 @@ type TreeNode =
   - manual dependency install opens a new tab and original startup command still runs in the task tab regardless of the automatic prompt flag.
   - finish flow succeeds for clean merge and removes worktree/branch.
   - dirty main checkout blocks merge.
-  - conflict merge aborts and leaves main checkout clean.
+  - force merge requires explicit confirmation, restores the main worktree changes, retains the stash, and blocks cleanup when restoration conflicts.
+  - main-checkout conflict merge restores its baseline after verified abort; abort/restore failures preserve evidence and block cleanup instead of claiming the checkout is clean.
 
 ### 7. Wrong vs Correct
 

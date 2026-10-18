@@ -25,7 +25,8 @@ get_app_version() -> AppVersion // distribution = standalone | portable | aur
 - Portable builds still call the signed Tauri updater `check()` API and may show version/date/release notes.
 - Portable builds never call `Update.download()`, `Update.install()`, or `relaunch()` from the updater flow. Their primary action opens the matching GitHub Release page for manual ZIP replacement.
 - Standalone and AUR behavior stays unchanged: standalone downloads/installs/relaunches; AUR skips updater operations and opens the AUR package page.
-- The Windows x64 ZIP contains one `CLI-Manager/` root with `cli-manager.exe`, `cli-manager-codex-proxy.exe`, `portable.flag`, and `resources/`. It must not contain an installer or a user `data-root.json`.
+- The Windows x64 ZIP contains one `CLI-Manager/` root with `cli-manager.exe`, `cli-manager-codex-proxy.exe`, `cli-manager-daemon.exe`, `cli-manager-web-daemon.exe`, `portable.flag`, `resources/`, and `apps/web/dist/` (including `index.html` and `assets/`). It must not contain an installer or a user `data-root.json`.
+- Validate all four executables and the Web entry as files, and `resources/` and Web `assets/` as directories before replacing existing output. Web resources live beside `resources/`, not inside it; preserve the runtime's `apps/web/dist` path.
 - The portable ZIP is uploaded to the same draft GitHub Release but is not referenced from `latest.json`; Tauri installer selection must continue using signed installer artifacts only.
 
 ### 4. Validation & Error Matrix
@@ -49,6 +50,7 @@ get_app_version() -> AppVersion // distribution = standalone | portable | aur
 
 - Type-check updater distribution branches with `npx tsc --noEmit`.
 - Run the portable packaging script against a release directory and inspect ZIP entries.
+- Verify ZIP layout/content and rejection of missing inputs before existing output is changed.
 - Release workflow verification must require `CLI-Manager-V<version>-Windows-x64-portable.zip` before publishing.
 
 ### 7. Wrong vs Correct
@@ -303,6 +305,46 @@ test "$R2_PUBLIC_BASE_URL" = "https://current-host.example.com"
 "permissions": ["updater:default", "process:allow-restart"]
 ```
 
+## Scenario: Bundle resources before direct Cargo release checks
+
+### Root cause and contract
+
+Direct Cargo commands invoke `src-tauri/build.rs` and validate `bundle.resources` before
+Tauri can run `build.beforeBuildCommand`. The Windows release job must produce the Web
+bundle and download/verify the signed SSH Agent files before either proxy check. A warm
+checkout containing `apps/web/dist` does not prove this ordering is correct.
+
+- Prepare resources in the invoking workflow; keep `build.rs` as a thin `tauri_build::build()` entry.
+- Do not remove resource mappings, inject a synthetic `TAURI_CONFIG`, or allow checks to fail silently.
+- Linux/macOS continue using Tauri's normal `beforeBuildCommand` to build the frontend and Web bundle.
+- Both Windows checks must complete before the signed Tauri packaging step.
+
+### Discovery list
+
+- [x] `.github/workflows/release.yml`: owns prerequisite ordering and failure propagation.
+- [x] `apps/web/package.json` and the root `web:build` script: produce `dist/index.html` and `dist/assets`; commands unchanged.
+- [x] `src-tauri/tauri.conf.json`: declares Web and SSH Agent bundle resources; mappings and signing configuration unchanged.
+- [x] `src-tauri/build.rs`: validates those resources for direct Cargo builds as well as Tauri builds; unchanged.
+- [x] `scripts/codexAppServerProxy.e2e.test.mjs`: builds the real proxy with Cargo and checks its behavior; assertions unchanged.
+- [x] `scripts/tauri-cli.mjs` and `scripts/tauriCliDevProxy.test.mjs`: direct local Cargo/prebuild callers share the resource prerequisite; runtime wrapper unchanged.
+- [x] `.github/scripts/release-workflow.test.mjs`: prevents resource producers from moving after Windows Cargo consumers.
+- [x] PTY, IPC, window focus, split panes, WSL project paths and CLI Hooks: unrelated to build-host resource preparation.
+
+### Scenario and validation matrix
+
+| Scenario | Required behavior |
+|---|---|
+| Fresh Windows checkout without `apps/web/dist` | Build real Web assets before invoking the proxy's Cargo build. |
+| Warm Windows checkout | Rebuild Web assets; do not infer freshness from directory existence. |
+| Missing/failed SSH Agent download | Fail resource verification before proxy tests and packaging. |
+| Linux/macOS release | Keep normal Tauri frontend/Web preparation and signed bundle checks. |
+| Direct local Cargo or Windows development prebuild | Prepare configured bundle resources first; the Cargo build script does not run npm. |
+| Resource producer or Windows test fails | Fail the job; do not publish the draft release. |
+
+Run `node .github/scripts/release-workflow.test.mjs` in release preparation. Verify that the
+old workflow fails this guard, then run `npm run web:build`, `npm run test:codex-proxy:e2e`
+and `npm run test:tauri-dev-proxy` from a clean Windows checkout with the required Agent resources.
+
 ## Scenario: Target-scoped Tauri configuration features
 
 ### 1. Scope / Trigger
@@ -326,8 +368,8 @@ tauri = { version = "2", features = ["macos-private-api"] }
 
 ```text
 # scripts/tauri-cli.mjs, Windows `tauri dev` only
-cargo build --locked --manifest-path <repo>/src-tauri/Cargo.toml \
-  --bin cli-manager-codex-proxy [--target <triple>] [--release] \
+cargo build --locked --no-default-features --manifest-path <repo>/src-tauri/Cargo.toml \
+  --bin cli-manager --bin cli-manager-codex-proxy [--target <triple>] [--release] \
   [--profile <name>] [--target-dir <path>]
 ```
 
@@ -337,7 +379,9 @@ cargo build --locked --manifest-path <repo>/src-tauri/Cargo.toml \
 - Windows and Linux direct Cargo commands must not activate `macos-private-api`.
 - macOS builds must activate `macos-private-api` and keep `app.macOSPrivateApi = true`.
 - Tests must exercise the real Cargo invocation; do not inject a synthetic `TAURI_CONFIG` merely to suppress the consistency error.
-- On Windows, the `scripts/tauri-cli.mjs` `dev` entrypoint must build `cli-manager-codex-proxy` before spawning Tauri, because remote Codex handoff resolves `current_exe().with_file_name("cli-manager-codex-proxy.exe")`.
+- On Windows, the `scripts/tauri-cli.mjs` `dev` entrypoint must build `cli-manager` and `cli-manager-codex-proxy` before spawning Tauri. The proxy is required because remote Codex handoff resolves `current_exe().with_file_name("cli-manager-codex-proxy.exe")`; selecting both binaries in one Cargo invocation lets the shared library build graph be reused.
+- The proxy prebuild must use the same `--no-default-features` development feature selection as Tauri's Cargo invocation, in addition to forwarding explicit feature selection arguments when supplied.
+- The proxy prebuild must mirror the `TAURI_CONFIG` JSON merge value generated by the selected `--config`/`-c` extension so `tauri-build` sees the same Cargo fingerprint input before Tauri starts.
 - The prebuild must forward both `--target <triple>` / `--target=<triple>` and `-t <triple>` / `-t=<triple>` as Cargo's `--target <triple>`.
 - Tauri's first `--` starts Cargo runner arguments; only the second `--` starts application arguments. The prebuild must inspect Tauri options and runner arguments, forward `--release`, `--profile`, and `--target-dir`, and ignore everything after the second boundary.
 - A failed or unavailable Cargo prebuild must return a non-zero exit and must not start Tauri. Non-Windows platforms and non-`dev` Tauri commands must not run this prebuild.
@@ -350,10 +394,10 @@ cargo build --locked --manifest-path <repo>/src-tauri/Cargo.toml \
 | macOS target feature is missing | Reject: macOS transparent/private-API window behavior loses its required Cargo capability. |
 | macOS feature exists but `macOSPrivateApi` is false/missing | Reject through the existing macOS window-controls verification. |
 | Common and target dependency declarations are correctly split | Windows/Linux resolve only common features; macOS additionally resolves `macos-private-api`. |
-| Windows `tauri dev` without a target | Build the proxy into Cargo's default debug target before Tauri starts. |
-| Windows `tauri dev` with either target syntax | Build the proxy for the same target triple before Tauri starts. |
-| Windows `tauri dev --release` | Build the proxy in the release profile before Tauri starts. |
-| Windows runner arguments select `--profile` or `--target-dir` | Forward the selection to the proxy Cargo build. |
+| Windows `tauri dev` without a target | Build the main binary and proxy into Cargo's default debug target before Tauri starts, including the selected `TAURI_CONFIG` fingerprint input. |
+| Windows `tauri dev` with either target syntax | Build both selected binaries for the same target triple before Tauri starts. |
+| Windows `tauri dev --release` | Build both selected binaries in the release profile before Tauri starts. |
+| Windows runner arguments select `--profile`, `--target-dir` or features | Forward the selection to the proxy Cargo build. |
 | Application arguments after the second `--` resemble Cargo options | Ignore them when selecting the proxy build target/profile/directory. |
 | Windows proxy Cargo build fails | Return Cargo's non-zero result and do not invoke Tauri. |
 | Non-Windows or a non-`dev` Tauri command | Do not build the Windows proxy. |
@@ -363,7 +407,7 @@ cargo build --locked --manifest-path <repo>/src-tauri/Cargo.toml \
 - Good: Windows Codex proxy E2E calls `cargo build --locked` directly and succeeds without platform-config overrides.
 - Base: normal Tauri CLI builds continue merging the platform config and resolve the same target-specific feature set.
 - Bad: set `TAURI_CONFIG` inside one test to claim success while the manifest still enables a macOS-only feature globally.
-- Good: `npm run tauri dev -- --target x86_64-pc-windows-msvc` completes the proxy prebuild before launching the dev process.
+- Good: `npm run tauri dev -- --target x86_64-pc-windows-msvc` completes the main/proxy prebuild before launching the dev process, and a second unchanged launch lets Cargo reuse both artifacts.
 - Bad: rely on Cargo's `default-run = "cli-manager"` and launch Tauri without compiling the separately consumed proxy binary.
 
 ### 6. Tests Required
@@ -372,7 +416,7 @@ cargo build --locked --manifest-path <repo>/src-tauri/Cargo.toml \
 - Run `npm run test:codex-proxy:e2e` on Windows.
 - Run `cargo check --locked --manifest-path src-tauri/Cargo.toml`.
 - Run `node scripts/verify-macos-window-controls.mjs`.
-- Run `npm run test:tauri-dev-proxy` on Windows. Assert Cargo runs before Tauri, target forwarding covers Tauri and runner long/short forms, release/profile/target-dir respect both `--` boundaries, Cargo failure prevents Tauri launch, and `build` does not prebuild the proxy.
+- Run `npm run test:tauri-dev-proxy` on Windows. Assert Cargo runs before Tauri, both binaries and `--no-default-features` are selected, the `TAURI_CONFIG` merge value is mirrored for file and inline config, feature/target forwarding covers Tauri and runner long/short forms, release/profile/target-dir respect both `--` boundaries, Cargo failure prevents Tauri launch, and `build` does not prebuild the proxy.
 
 ### 7. Wrong vs Correct
 

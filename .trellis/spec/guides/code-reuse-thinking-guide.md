@@ -58,6 +58,18 @@ grep -r "keyword" .
 
 **Good**: Single source of truth, import everywhere
 
+### Pattern 4: Source-panel interaction lifecycles
+
+**Problem**: Two panels can expose the same user action while each owns its own pointer threshold, preview, cleanup, and target delivery code. The behavior works initially, then one source silently misses later fixes.
+
+**Good**: For application-internal file-to-terminal drags, every source panel must use `useTerminalFilePointerDrag`. The shared hook owns the pointer threshold, payload creation, rAF preview, terminal drop-zone commit, cleanup, and post-drag click suppression. Source panels provide only their `{ path, kind }` item and any source-specific non-terminal drop callback.
+
+**Checklist**:
+
+- [ ] When adding a new file-path source, enumerate existing source panels before adding handlers.
+- [ ] Keep target path resolution in `useTerminalInput`; do not fork it per producer.
+- [ ] Git Changes and File Explorer supply file/directory descriptors; File Explorer additionally supplies its tree-move callback and Git Changes supplies its active repository root.
+
 ---
 
 ## When to Abstract
@@ -74,14 +86,12 @@ grep -r "keyword" .
 
 ---
 
-## File Size: A Signal, Not a Limit
+## File Size: Bounded Responsibility
 
-> **A large file is a signal to look, not a rule to obey.** There is no hard line count.
-
-Do **not** split a file just to hit a number. Splitting a cohesive file by line count scatters
-related logic and makes it *harder* to follow. Tooling (grep + offset reads + the GitNexus symbol
-graph) locates symbols fine regardless of file length — "help the AI read it" is **not** a valid
-reason to split.
+Handwritten code has a **2000 physical-line hard limit**. Prefer 400–1200 lines for normal
+modules and split along responsibility boundaries, never arbitrary numbered chunks.
+See [AI Architecture Contracts](../frontend/ai-architecture-contracts.md) for the executable
+check, temporary shrinking baseline, and AI reading/token workflow.
 
 The real cost of a large file is **implicit coupling**, not reading effort: when 100 functions
 share the same refs, closures, and effect dependencies in one module, changing one safely means
@@ -95,7 +105,7 @@ reasoning about all of them. That is exactly the "patch here, break there" risk 
 | The file is… | Action |
 |---|---|
 | A **junk drawer** — rendering + IPC/PTY bridging + shortcuts + state sync tangled together | Consider splitting **along responsibility seams** — to decouple and reduce blast radius, not to shrink the number |
-| **Cohesive** — single responsibility, clear state, rarely churns (even if long) | Leave it. Splitting wastes effort and hurts readability |
+| **Cohesive** — single responsibility, clear state, rarely churns | Keep it cohesive below the hard limit; above it, extract named data, tests or sub-responsibilities while preserving the public entry |
 
 ### If you do split
 

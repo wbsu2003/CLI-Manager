@@ -1,40 +1,128 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(all(test, target_os = "windows"))]
+extern crate self as cli_manager_lib;
+
+mod app;
+pub(crate) use app::migrations::{
+    migrations, MIGRATION_ADD_CLI_ARGS_DESCRIPTION, MIGRATION_ADD_CLI_ARGS_SQL,
+    MIGRATION_ADD_CLI_ARGS_VERSION, MIGRATION_ADD_GROUP_BOUND_PATH_DESCRIPTION,
+    MIGRATION_ADD_GROUP_BOUND_PATH_SQL, MIGRATION_ADD_GROUP_BOUND_PATH_VERSION,
+    MIGRATION_ADD_PROJECT_PATH_MODE_DESCRIPTION, MIGRATION_ADD_PROJECT_PATH_MODE_SQL,
+    MIGRATION_ADD_PROJECT_PATH_MODE_VERSION, MIGRATION_ADD_SSH_ATTACHMENT_ROOT_DESCRIPTION,
+    MIGRATION_ADD_SSH_ATTACHMENT_ROOT_SQL, MIGRATION_ADD_SSH_ATTACHMENT_ROOT_VERSION,
+    MIGRATION_ADD_USAGE_ERROR_DETAIL_DESCRIPTION, MIGRATION_ADD_USAGE_ERROR_DETAIL_SQL,
+    MIGRATION_ADD_USAGE_ERROR_DETAIL_VERSION, MIGRATION_ADD_WORKTREE_ISOLATION_DESCRIPTION,
+    MIGRATION_ADD_WORKTREE_ISOLATION_SQL, MIGRATION_ADD_WORKTREE_ISOLATION_VERSION,
+    MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL,
+    MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION, MIGRATION_CREATE_REQUEST_LOGS_SQL,
+    MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_DESCRIPTION,
+    MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_SQL,
+    MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_VERSION, MIGRATION_CREATE_SSH_HOSTS_DESCRIPTION,
+    MIGRATION_CREATE_SSH_HOSTS_SQL, MIGRATION_CREATE_SSH_HOSTS_VERSION,
+    MIGRATION_CREATE_SSH_HOST_GROUPS_DESCRIPTION, MIGRATION_CREATE_SSH_HOST_GROUPS_SQL,
+    MIGRATION_CREATE_SSH_HOST_GROUPS_VERSION, MIGRATION_CREATE_USAGE_RECORDS_SQL,
+    MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL,
+    MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_SQL, MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_SQL,
+    MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_WITH_ERROR_DETAIL_SQL,
+    NODE_APPEARANCE_MIGRATION_DESCRIPTION, NODE_APPEARANCE_MIGRATION_SQL,
+    NODE_APPEARANCE_MIGRATION_VERSION,
+};
+#[cfg(test)]
+pub(crate) use app::migrations::{
+    MIGRATION_ADD_NODE_APPEARANCE_VERSION, MIGRATION_ADD_SSH_CONFIG_FILE_SQL,
+    MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION, MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL,
+    MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION,
+    MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION,
+    MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION, MIGRATION_CREATE_EXTENSION_SKILLS_SQL,
+    MIGRATION_CREATE_EXTENSION_SKILLS_VERSION, MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION,
+    MIGRATION_CREATE_MESSAGE_STARS_SQL, MIGRATION_CREATE_MESSAGE_STARS_VERSION,
+    MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
+};
+
+#[path = "infrastructure/storage/app_paths.rs"]
 pub mod app_paths;
+#[path = "features/providers/ccswitch_db.rs"]
 mod ccswitch_db;
+#[path = "features/extensions/mod.rs"]
+pub(crate) mod extensions;
+#[path = "features/hooks/claude.rs"]
 mod claude_hook;
+#[path = "features/codex-proxy/mod.rs"]
 pub mod codex_app_server_proxy;
+#[path = "features/statusline/codex.rs"]
 pub mod codex_statusline;
 mod commands;
+#[path = "infrastructure/process/conpty_sideload.rs"]
 mod conpty_sideload;
+#[path = "infrastructure/diagnostics/crash_reporter.rs"]
 mod crash_reporter;
-mod credential_store;
+#[path = "infrastructure/storage/credential_store.rs"]
+pub(crate) mod credential_store;
+#[path = "infrastructure/storage/repo_operation.rs"]
+pub(crate) mod repo_operation;
 // daemon 二进制（src/bin/cli-manager-daemon.rs）经 lib 复用以下模块，
 // 因此 app_paths 与 daemon 需 pub。
+#[path = "infrastructure/daemon/mod.rs"]
 pub mod daemon;
+pub mod device_identity;
+#[path = "infrastructure/files/file_watcher.rs"]
 mod file_watcher;
+#[path = "features/git/watcher.rs"]
 mod git_watcher;
+#[path = "features/hooks/client.rs"]
 pub mod hook_client;
+#[path = "features/hooks/codex_goal.rs"]
+mod codex_goal;
+#[path = "infrastructure/system/linux_graphics.rs"]
 mod linux_graphics;
+#[path = "features/files/live_server/mod.rs"]
+mod live_server;
+#[path = "infrastructure/diagnostics/log_rotation.rs"]
 mod log_rotation;
+#[path = "infrastructure/process/process_job.rs"]
 mod process_job;
+#[path = "features/providers/service/mod.rs"]
 pub(crate) mod provider;
+#[path = "infrastructure/pty/mod.rs"]
 pub mod pty;
+#[path = "infrastructure/diagnostics/runtime.rs"]
 mod runtime_diagnostics;
+#[path = "infrastructure/process/shell_resolver.rs"]
 mod shell_resolver;
+#[path = "infrastructure/ssh/agent_supply_chain.rs"]
 mod ssh_agent_supply_chain;
+#[path = "infrastructure/ssh/askpass.rs"]
 pub mod ssh_askpass;
+#[path = "infrastructure/ssh/launch.rs"]
 pub mod ssh_launch;
+#[path = "infrastructure/ssh/proxy.rs"]
 pub mod ssh_proxy;
+#[path = "infrastructure/ssh/transport.rs"]
 pub mod ssh_transport;
+#[path = "features/statusline/mod.rs"]
 pub mod statusline;
+#[path = "features/statusline/profiles.rs"]
 pub mod statusline_profiles;
+#[path = "features/sync/service/mod.rs"]
 mod sync;
+#[path = "shared/text_encoding.rs"]
 mod text_encoding;
+#[path = "features/notifications/service/mod.rs"]
 mod third_party_notification;
+#[path = "features/stats/usage.rs"]
 pub mod usage;
+#[path = "features/stats/usage_schema.rs"]
+pub(crate) mod usage_schema;
+pub mod web_daemon;
+mod web_device_outbox;
+#[path = "infrastructure/webdav/mod.rs"]
 mod webdav;
+#[path = "infrastructure/process/wsl.rs"]
 mod wsl;
+#[cfg(target_os = "windows")]
+#[path = "shared/windows_command_line.rs"]
+mod windows_command_line;
 
 use log::LevelFilter;
 use serde_json::Value;
@@ -45,13 +133,14 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime,
 };
 use tauri_plugin_log::{fern, Builder as LogBuilder, Target, TargetKind, TimezoneStrategy};
-use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
+use tauri_plugin_sql::Builder as SqlBuilder;
 
 const WEBVIEW_DEFAULT_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 const WEBVIEW_DISABLE_GPU_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu";
 
+// 尝试显示、还原并聚焦主窗口，窗口不存在或操作失败时忽略。
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -63,6 +152,7 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 #[derive(Default)]
 struct PendingBackgroundSession(Mutex<Option<String>>);
 
+// 从相邻命令行参数中提取非空后台会话恢复目标。
 fn background_session_arg(args: &[String]) -> Option<String> {
     args.windows(2).find_map(|pair| {
         (pair[0] == "--restore-background-session" && !pair[1].trim().is_empty())
@@ -70,6 +160,7 @@ fn background_session_arg(args: &[String]) -> Option<String> {
     })
 }
 
+// 缓存待恢复后台会话并广播激活请求，锁失败仍尝试发送事件。
 fn set_pending_background_session<R: Runtime>(app: &AppHandle<R>, session_id: String) {
     if let Ok(mut pending) = app.state::<PendingBackgroundSession>().0.lock() {
         *pending = Some(session_id.clone());
@@ -78,6 +169,7 @@ fn set_pending_background_session<R: Runtime>(app: &AppHandle<R>, session_id: St
 }
 
 #[tauri::command]
+// 一次性取走缓存的后台会话目标，锁异常时返回空。
 fn take_pending_background_session(
     pending: tauri::State<'_, PendingBackgroundSession>,
 ) -> Option<String> {
@@ -85,17 +177,20 @@ fn take_pending_background_session(
 }
 
 #[tauri::command]
+// 通过 IPC 请求唤起主窗口，底层窗口操作失败不向调用方传播。
 fn app_show_main_window(app: AppHandle) -> Result<(), String> {
     show_main_window(&app);
     Ok(())
 }
 
 #[tauri::command]
+// 请求 Tauri 以成功退出码结束应用，由退出事件执行相关清理。
 fn app_exit(app: AppHandle) {
     app.exit(0);
 }
 
 #[tauri::command]
+// 打开主窗口开发者工具，主窗口不存在时返回错误。
 fn app_open_devtools(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -104,6 +199,7 @@ fn app_open_devtools(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// 初始化守护进程治理与崩溃记录，运行服务后按结果终止当前进程。
 pub fn run_daemon_and_exit() -> ! {
     use crate::daemon::discovery::daemon_info_path;
     use crate::daemon::server::{DaemonServer, DaemonServerConfig};
@@ -142,796 +238,29 @@ mod simple_stderr_logger {
     struct StderrLogger;
 
     impl log::Log for StderrLogger {
+        // 仅允许 Info 及更严重级别进入守护进程标准错误日志。
         fn enabled(&self, metadata: &Metadata) -> bool {
             metadata.level() <= Level::Info
         }
+        // 按级别过滤后将原日志参数写入标准错误，不额外脱敏。
         fn log(&self, record: &Record) {
             if self.enabled(record.metadata()) {
                 eprintln!("[{}] {}", record.level(), record.args());
             }
         }
+        // 实现日志刷新接口；当前标准错误记录器不维护待刷缓存。
         fn flush(&self) {}
     }
 
     static LOGGER: StderrLogger = StderrLogger;
 
+    // 安装静态标准错误记录器，成功后将全局最高日志级别设为 Info。
     pub fn init() -> Result<(), log::SetLoggerError> {
         log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info))
     }
 }
 
-pub(crate) const MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_VERSION: i64 = 13;
-pub(crate) const MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_DESCRIPTION: &str =
-    "create_session_favorite_snapshots_table";
-pub(crate) const MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS session_favorite_snapshots (
-                    session_key   TEXT PRIMARY KEY,
-                    session_id    TEXT NOT NULL,
-                    source        TEXT NOT NULL,
-                    project_key   TEXT NOT NULL,
-                    file_path     TEXT NOT NULL,
-                    title         TEXT NOT NULL,
-                    created_at    INTEGER NOT NULL,
-                    updated_at    INTEGER NOT NULL,
-                    message_count INTEGER NOT NULL,
-                    branch        TEXT,
-                    detail_json   TEXT NOT NULL,
-                    snapshot_at   TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_session_favorite_snapshots_source ON session_favorite_snapshots(source);
-                CREATE INDEX IF NOT EXISTS idx_session_favorite_snapshots_updated ON session_favorite_snapshots(updated_at DESC);
-            ";
-
-pub(crate) const MIGRATION_ADD_CLI_ARGS_VERSION: i64 = 14;
-pub(crate) const MIGRATION_ADD_CLI_ARGS_DESCRIPTION: &str = "add_cli_args_to_projects";
-pub(crate) const MIGRATION_ADD_CLI_ARGS_SQL: &str =
-    "ALTER TABLE projects ADD COLUMN cli_args TEXT NOT NULL DEFAULT '';";
-
-pub(crate) const MIGRATION_ADD_WORKTREE_ISOLATION_VERSION: i64 = 15;
-pub(crate) const MIGRATION_ADD_WORKTREE_ISOLATION_DESCRIPTION: &str =
-    "add_worktree_isolation_tables";
-pub(crate) const MIGRATION_ADD_WORKTREE_ISOLATION_SQL: &str = "
-                ALTER TABLE projects ADD COLUMN worktree_strategy TEXT NOT NULL DEFAULT 'disabled';
-                ALTER TABLE projects ADD COLUMN worktree_root TEXT NOT NULL DEFAULT '';
-
-                CREATE TABLE IF NOT EXISTS worktrees (
-                    id                    TEXT PRIMARY KEY,
-                    project_id            TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    name                  TEXT NOT NULL,
-                    branch                TEXT NOT NULL,
-                    path                  TEXT NOT NULL,
-                    base_branch           TEXT NOT NULL DEFAULT '',
-                    deps_prompt_dismissed INTEGER NOT NULL DEFAULT 0,
-                    status                TEXT NOT NULL DEFAULT 'active',
-                    created_at            TEXT NOT NULL,
-                    updated_at            TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_worktrees_project ON worktrees(project_id);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_project_name ON worktrees(project_id, name);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path ON worktrees(path);
-            ";
-
-const MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_VERSION: i64 = 16;
-const MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_DESCRIPTION: &str =
-    "add_worktree_deps_prompt_setting";
-const MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_SQL: &str =
-    "ALTER TABLE projects ADD COLUMN worktree_deps_prompt_enabled INTEGER NOT NULL DEFAULT 0;";
-
-const MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_VERSION: i64 = 17;
-const MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_DESCRIPTION: &str =
-    "add_provider_overrides_to_worktrees";
-const MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_SQL: &str =
-    "ALTER TABLE worktrees ADD COLUMN provider_overrides TEXT NOT NULL DEFAULT '{}';";
-
-const MIGRATION_CREATE_HISTORY_EDIT_AUDIT_VERSION: i64 = 18;
-const MIGRATION_CREATE_HISTORY_EDIT_AUDIT_DESCRIPTION: &str = "create_history_edit_audit_table";
-const MIGRATION_CREATE_HISTORY_EDIT_AUDIT_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS history_edit_audit (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_key TEXT NOT NULL,
-                    session_id  TEXT NOT NULL,
-                    source      TEXT NOT NULL,
-                    file_path   TEXT NOT NULL,
-                    op          TEXT NOT NULL,
-                    line_index  INTEGER,
-                    role        TEXT,
-                    before_text TEXT,
-                    after_text  TEXT,
-                    backup_path TEXT,
-                    created_at  INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_history_edit_audit_session ON history_edit_audit(session_key, created_at DESC);
-            ";
-
-pub(crate) const MIGRATION_CREATE_REQUEST_LOGS_VERSION: i64 = 19;
-pub(crate) const MIGRATION_CREATE_REQUEST_LOGS_DESCRIPTION: &str = "create_request_logs_tables";
-pub(crate) const MIGRATION_CREATE_REQUEST_LOGS_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS request_logs (
-                    request_id             TEXT PRIMARY KEY,
-                    source                 TEXT NOT NULL,
-                    project_key            TEXT NOT NULL DEFAULT '',
-                    session_id             TEXT NOT NULL,
-                    file_path              TEXT NOT NULL,
-                    event_key              TEXT NOT NULL,
-                    event_index            INTEGER NOT NULL,
-                    timestamp_ms           INTEGER NOT NULL,
-                    model                  TEXT,
-                    input_tokens           INTEGER NOT NULL DEFAULT 0,
-                    output_tokens          INTEGER NOT NULL DEFAULT 0,
-                    cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-                    cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
-                    created_at_ms          INTEGER NOT NULL,
-                    updated_at_ms          INTEGER NOT NULL,
-                    UNIQUE(file_path, event_key)
-                );
-                CREATE INDEX IF NOT EXISTS idx_request_logs_time
-                    ON request_logs(timestamp_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_request_logs_source_project
-                    ON request_logs(source, project_key, timestamp_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_request_logs_session
-                    ON request_logs(source, session_id);
-                CREATE INDEX IF NOT EXISTS idx_request_logs_model
-                    ON request_logs(model, timestamp_ms DESC);
-
-                CREATE TABLE IF NOT EXISTS request_log_sync (
-                    file_path          TEXT PRIMARY KEY,
-                    source             TEXT NOT NULL,
-                    file_created_at    INTEGER NOT NULL,
-                    file_updated_at    INTEGER NOT NULL,
-                    file_size          INTEGER NOT NULL,
-                    parser_version     INTEGER NOT NULL,
-                    last_synced_at_ms  INTEGER NOT NULL
-                );
-            ";
-
-pub(crate) const MIGRATION_CREATE_SSH_HOSTS_VERSION: i64 = 20;
-pub(crate) const MIGRATION_CREATE_SSH_HOSTS_DESCRIPTION: &str =
-    "create_ssh_hosts_and_project_environment";
-pub(crate) const MIGRATION_CREATE_SSH_HOSTS_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS ssh_hosts (
-                    id                        TEXT PRIMARY KEY,
-                    name                      TEXT NOT NULL,
-                    group_name                TEXT NOT NULL DEFAULT '',
-                    host                      TEXT NOT NULL DEFAULT '',
-                    port                      INTEGER NOT NULL DEFAULT 22,
-                    username                  TEXT NOT NULL DEFAULT '',
-                    config_alias              TEXT NOT NULL DEFAULT '',
-                    auth_mode                 TEXT NOT NULL DEFAULT 'ssh_config',
-                    identity_file             TEXT NOT NULL DEFAULT '',
-                    credential_ref            TEXT NOT NULL DEFAULT '',
-                    jump_mode                 TEXT NOT NULL DEFAULT 'none',
-                    jump_host_id              TEXT REFERENCES ssh_hosts(id) ON DELETE SET NULL,
-                    proxy_type                TEXT NOT NULL DEFAULT 'none',
-                    proxy_host                TEXT NOT NULL DEFAULT '',
-                    proxy_port                INTEGER NOT NULL DEFAULT 0,
-                    proxy_command             TEXT NOT NULL DEFAULT '',
-                    connect_timeout_sec       INTEGER NOT NULL DEFAULT 15,
-                    server_alive_interval_sec INTEGER NOT NULL DEFAULT 30,
-                    server_alive_count_max    INTEGER NOT NULL DEFAULT 3,
-                    terminal_encoding         TEXT NOT NULL DEFAULT 'UTF-8',
-                    startup_script            TEXT NOT NULL DEFAULT '',
-                    notes                     TEXT NOT NULL DEFAULT '',
-                    sort_order                INTEGER NOT NULL DEFAULT 0,
-                    created_at                TEXT NOT NULL,
-                    updated_at                TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_ssh_hosts_group ON ssh_hosts(group_name, sort_order, name);
-                CREATE INDEX IF NOT EXISTS idx_ssh_hosts_jump ON ssh_hosts(jump_host_id);
-
-                ALTER TABLE projects ADD COLUMN environment_type TEXT NOT NULL DEFAULT 'local';
-                ALTER TABLE projects ADD COLUMN ssh_host_id TEXT REFERENCES ssh_hosts(id) ON DELETE SET NULL;
-                ALTER TABLE projects ADD COLUMN remote_path TEXT NOT NULL DEFAULT '';
-                CREATE INDEX IF NOT EXISTS idx_projects_environment ON projects(environment_type);
-                CREATE INDEX IF NOT EXISTS idx_projects_ssh_host ON projects(ssh_host_id);
-              ";
-
-pub(crate) const MIGRATION_CREATE_SSH_HOST_GROUPS_VERSION: i64 = 21;
-pub(crate) const MIGRATION_CREATE_SSH_HOST_GROUPS_DESCRIPTION: &str =
-    "create_hierarchical_ssh_host_groups";
-pub(crate) const MIGRATION_CREATE_SSH_HOST_GROUPS_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS ssh_host_groups (
-                    id         TEXT PRIMARY KEY,
-                    name       TEXT NOT NULL,
-                    parent_id  TEXT REFERENCES ssh_host_groups(id) ON DELETE SET NULL,
-                    sort_order INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_ssh_host_groups_parent
-                    ON ssh_host_groups(parent_id, sort_order, name);
-                ALTER TABLE ssh_hosts ADD COLUMN group_id TEXT REFERENCES ssh_host_groups(id) ON DELETE SET NULL;
-                INSERT INTO ssh_host_groups (id, name, parent_id, sort_order, created_at)
-                SELECT lower(hex(randomblob(16))), group_name, NULL, 0, CAST(strftime('%s', 'now') AS TEXT)
-                FROM ssh_hosts
-                WHERE trim(group_name) <> ''
-                GROUP BY group_name;
-                UPDATE ssh_hosts
-                SET group_id = (
-                    SELECT id FROM ssh_host_groups
-                    WHERE parent_id IS NULL AND name = ssh_hosts.group_name
-                    ORDER BY created_at, id LIMIT 1
-                )
-                WHERE trim(group_name) <> '';
-                CREATE INDEX IF NOT EXISTS idx_ssh_hosts_group_id
-                    ON ssh_hosts(group_id, sort_order, name);
-              ";
-
-const MIGRATION_ADD_SSH_CONFIG_FILE_VERSION: i64 = 22;
-const MIGRATION_ADD_SSH_CONFIG_FILE_DESCRIPTION: &str = "add_ssh_config_file";
-const MIGRATION_ADD_SSH_CONFIG_FILE_SQL: &str =
-    "ALTER TABLE ssh_hosts ADD COLUMN config_file TEXT NOT NULL DEFAULT '';";
-
-const MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_VERSION: i64 = 23;
-const MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_DESCRIPTION: &str =
-    "create_ssh_agent_integrations_and_project_cli_config_root";
-const MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL: &str = "
-                ALTER TABLE projects ADD COLUMN cli_config_root TEXT NOT NULL DEFAULT '';
-
-                CREATE TABLE IF NOT EXISTS ssh_agent_installations (
-                    host_id             TEXT PRIMARY KEY REFERENCES ssh_hosts(id) ON DELETE CASCADE,
-                    installation_id     TEXT NOT NULL DEFAULT '',
-                    remote_machine_id   TEXT NOT NULL DEFAULT '',
-                    agent_version       TEXT NOT NULL DEFAULT '',
-                    protocol_version    TEXT NOT NULL DEFAULT '',
-                    target              TEXT NOT NULL DEFAULT '',
-                    install_path        TEXT NOT NULL DEFAULT '',
-                    status              TEXT NOT NULL DEFAULT 'unknown',
-                    checked_at          TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS ssh_host_tool_preferences (
-                    host_id          TEXT NOT NULL REFERENCES ssh_hosts(id) ON DELETE CASCADE,
-                    source           TEXT NOT NULL,
-                    configured_root  TEXT NOT NULL DEFAULT '',
-                    updated_at       TEXT NOT NULL,
-                    PRIMARY KEY (host_id, source)
-                );
-
-                CREATE TABLE IF NOT EXISTS ssh_agent_tool_integrations (
-                    integration_id              TEXT PRIMARY KEY,
-                    host_id                     TEXT REFERENCES ssh_hosts(id) ON DELETE SET NULL,
-                    installation_id             TEXT NOT NULL DEFAULT '',
-                    remote_machine_id           TEXT NOT NULL DEFAULT '',
-                    ssh_user                    TEXT NOT NULL DEFAULT '',
-                    source                      TEXT NOT NULL,
-                    scope_kind                  TEXT NOT NULL DEFAULT 'hostPrimary',
-                    configured_root             TEXT NOT NULL DEFAULT '',
-                    canonical_root              TEXT NOT NULL DEFAULT '',
-                    config_root_hash            TEXT NOT NULL DEFAULT '',
-                    hook_record_json            TEXT NOT NULL DEFAULT '{}',
-                    history_source_instance_id  TEXT NOT NULL DEFAULT '',
-                    validation_state            TEXT NOT NULL DEFAULT 'unvalidated',
-                    cleanup_state               TEXT NOT NULL DEFAULT 'active',
-                    checked_at                  TEXT NOT NULL DEFAULT ''
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_ssh_agent_tool_host_primary
-                    ON ssh_agent_tool_integrations(host_id, source)
-                    WHERE host_id IS NOT NULL AND scope_kind = 'hostPrimary';
-                CREATE INDEX IF NOT EXISTS idx_ssh_agent_tool_identity
-                    ON ssh_agent_tool_integrations(
-                        installation_id, remote_machine_id, ssh_user, source, config_root_hash
-                    );
-                CREATE INDEX IF NOT EXISTS idx_ssh_agent_tool_history_source
-                    ON ssh_agent_tool_integrations(history_source_instance_id);
-              ";
-
-const MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_VERSION: i64 = 24;
-const MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_DESCRIPTION: &str =
-    "extend_ssh_agent_installation_metadata";
-const MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_SQL: &str = "
-                ALTER TABLE ssh_agent_installations ADD COLUMN install_root TEXT NOT NULL DEFAULT '';
-                ALTER TABLE ssh_agent_installations ADD COLUMN source TEXT NOT NULL DEFAULT '';
-                ALTER TABLE ssh_agent_installations ADD COLUMN manifest_url TEXT NOT NULL DEFAULT '';
-                ALTER TABLE ssh_agent_installations ADD COLUMN artifact_sha256 TEXT NOT NULL DEFAULT '';
-                ALTER TABLE ssh_agent_installations ADD COLUMN previous_version TEXT NOT NULL DEFAULT '';
-              ";
-
-const MIGRATION_CREATE_USAGE_RECORDS_VERSION: i64 = 27;
-const MIGRATION_CREATE_USAGE_RECORDS_SQL: &str = "
-                CREATE TABLE IF NOT EXISTS usage_records (
-                    record_id              TEXT PRIMARY KEY,
-                    logical_request_id     TEXT NOT NULL,
-                    data_source            TEXT NOT NULL CHECK (data_source IN ('route', 'session_log')),
-                    source                 TEXT NOT NULL,
-                    event_key              TEXT NOT NULL DEFAULT '',
-                    file_path             TEXT,
-                    event_index           INTEGER NOT NULL DEFAULT 0,
-                    session_id             TEXT,
-                    project_key            TEXT,
-                    project_path           TEXT,
-                    attribution_status     TEXT NOT NULL DEFAULT 'pending',
-                    provider_id            TEXT,
-                    provider_name          TEXT,
-                    requested_model        TEXT,
-                    outbound_model         TEXT,
-                    response_model         TEXT,
-                    pricing_model          TEXT,
-                    input_tokens           INTEGER NOT NULL DEFAULT 0,
-                    output_tokens          INTEGER NOT NULL DEFAULT 0,
-                    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                    usage_status           TEXT NOT NULL DEFAULT 'complete',
-                    status_code            INTEGER,
-                    outcome                TEXT NOT NULL DEFAULT 'success',
-                    error_code             TEXT,
-                    is_streaming           INTEGER NOT NULL DEFAULT 0,
-                    started_at_ms          INTEGER NOT NULL,
-                    completed_at_ms       INTEGER,
-                    duration_ms            INTEGER NOT NULL DEFAULT 0,
-                    attempt_index         INTEGER NOT NULL DEFAULT 0,
-                    attempt_count         INTEGER NOT NULL DEFAULT 1,
-                    degraded              INTEGER NOT NULL DEFAULT 0,
-                    created_at_ms         INTEGER NOT NULL,
-                    updated_at_ms         INTEGER NOT NULL,
-                    UNIQUE(data_source, logical_request_id, event_key)
-                );
-                CREATE INDEX IF NOT EXISTS idx_usage_records_time ON usage_records(started_at_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_usage_records_project ON usage_records(project_key, started_at_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_usage_records_session ON usage_records(session_id, started_at_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_usage_records_provider ON usage_records(provider_id, started_at_ms DESC);
-                CREATE INDEX IF NOT EXISTS idx_usage_records_source ON usage_records(source, data_source, started_at_ms DESC);
-                INSERT OR IGNORE INTO usage_records(
-                    record_id, logical_request_id, data_source, source, event_key,
-                    file_path, event_index, session_id, project_key, attribution_status,
-                    response_model, pricing_model, input_tokens, output_tokens,
-                    cache_read_tokens, cache_creation_tokens, usage_status, outcome,
-                    started_at_ms, completed_at_ms, duration_ms, created_at_ms, updated_at_ms
-                )
-                SELECT request_id, request_id, 'session_log', source, event_key,
-                       file_path, event_index, session_id, project_key, 'resolved',
-                       model, model, input_tokens, output_tokens, cache_read_tokens,
-                       cache_creation_tokens, 'complete', 'success', timestamp_ms,
-                       timestamp_ms, 0, updated_at_ms, updated_at_ms
-                FROM request_logs;
-                DROP VIEW IF EXISTS unified_usage_records;
-                CREATE VIEW unified_usage_records AS
-                SELECT
-                    u.record_id AS request_id,
-                    u.source,
-                    COALESCE(u.project_key, '') AS project_key,
-                    COALESCE(u.session_id, '') AS session_id,
-                    COALESCE(u.file_path, '') AS file_path,
-                    u.event_index,
-                    u.started_at_ms AS timestamp_ms,
-                    COALESCE(u.outbound_model, u.response_model, u.requested_model, u.pricing_model) AS model,
-                    u.input_tokens,
-                    u.output_tokens,
-                    u.cache_read_tokens,
-                    u.cache_creation_tokens,
-                    u.data_source,
-                    u.provider_id,
-                    u.provider_name,
-                    u.requested_model,
-                    u.outbound_model,
-                    u.response_model,
-                    u.usage_status,
-                    u.status_code,
-                    u.outcome,
-                    u.duration_ms,
-                    u.attempt_count,
-                    u.degraded
-                FROM usage_records u
-                WHERE u.data_source = 'route'
-                   OR NOT EXISTS (
-                        SELECT 1
-                        FROM usage_records r
-                        WHERE r.data_source = 'route'
-                          AND r.usage_status IN ('complete', 'partial')
-                          AND NULLIF(r.session_id, '') IS NOT NULL
-                          AND r.session_id = u.session_id
-                          AND ABS(r.started_at_ms - u.started_at_ms) <= 120000
-                          AND COALESCE(r.outbound_model, r.response_model, r.requested_model)
-                              = COALESCE(u.response_model, u.pricing_model)
-                          AND r.input_tokens = u.input_tokens
-                          AND r.output_tokens = u.output_tokens
-                          AND r.cache_read_tokens = u.cache_read_tokens
-                          AND r.cache_creation_tokens = u.cache_creation_tokens
-                   );
-                CREATE TABLE IF NOT EXISTS usage_daily_rollups (
-                    day_start_ms          INTEGER NOT NULL,
-                    source                TEXT NOT NULL,
-                    project_key           TEXT NOT NULL DEFAULT '',
-                    provider_id           TEXT NOT NULL DEFAULT '',
-                    outbound_model        TEXT NOT NULL DEFAULT '',
-                    request_count         INTEGER NOT NULL DEFAULT 0,
-                    input_tokens          INTEGER NOT NULL DEFAULT 0,
-                    output_tokens         INTEGER NOT NULL DEFAULT 0,
-                    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(day_start_ms, source, project_key, provider_id, outbound_model)
-                );
-              ";
-const MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_VERSION: i64 = 28;
-const MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_SQL: &str = "
-                DROP VIEW IF EXISTS unified_usage_records;
-                CREATE VIEW unified_usage_records AS
-                SELECT
-                    u.record_id AS request_id,
-                    u.source,
-                    COALESCE(u.project_key, '') AS project_key,
-                    COALESCE(u.session_id, '') AS session_id,
-                    COALESCE(u.file_path, '') AS file_path,
-                    u.event_index,
-                    u.started_at_ms AS timestamp_ms,
-                    COALESCE(u.outbound_model, u.response_model, u.requested_model, u.pricing_model) AS model,
-                    u.input_tokens,
-                    u.output_tokens,
-                    u.cache_read_tokens,
-                    u.cache_creation_tokens,
-                    u.data_source,
-                    u.provider_id,
-                    u.provider_name,
-                    u.requested_model,
-                    u.outbound_model,
-                    u.response_model,
-                    u.usage_status,
-                    u.status_code,
-                    u.outcome,
-                    u.duration_ms,
-                    u.attempt_count,
-                    u.degraded
-                FROM usage_records u
-                WHERE u.data_source = 'route'
-                   OR NOT EXISTS (
-                        SELECT 1
-                        FROM usage_records r
-                        WHERE r.data_source = 'route'
-                          AND r.usage_status IN ('complete', 'partial')
-                          AND NULLIF(TRIM(r.session_id), '') IS NOT NULL
-                          AND r.source = u.source
-                          AND r.session_id = u.session_id
-                          AND ABS(COALESCE(r.completed_at_ms, r.started_at_ms) - u.started_at_ms) <= 120000
-                          AND LOWER(COALESCE(r.outbound_model, r.response_model, r.requested_model, ''))
-                              = LOWER(COALESCE(u.response_model, u.pricing_model, ''))
-                          AND r.output_tokens = u.output_tokens
-                          AND (
-                              r.input_tokens = u.input_tokens
-                              OR r.input_tokens = u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens
-                              OR u.input_tokens = r.input_tokens + r.cache_read_tokens + r.cache_creation_tokens
-                          )
-                   );
-              ";
-const MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_VERSION: i64 = 29;
-const MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_SQL: &str = "
-                CREATE INDEX IF NOT EXISTS idx_usage_records_route_dedup
-                ON usage_records(
-                    source,
-                    data_source,
-                    session_id,
-                    output_tokens,
-                    COALESCE(completed_at_ms, started_at_ms)
-                );
-                DROP VIEW IF EXISTS unified_usage_records;
-                CREATE VIEW unified_usage_records AS
-                SELECT
-                    u.record_id AS request_id,
-                    u.source,
-                    COALESCE(u.project_key, '') AS project_key,
-                    COALESCE(u.session_id, '') AS session_id,
-                    COALESCE(u.file_path, '') AS file_path,
-                    u.event_index,
-                    u.started_at_ms AS timestamp_ms,
-                    COALESCE(u.outbound_model, u.response_model, u.requested_model, u.pricing_model) AS model,
-                    u.input_tokens,
-                    u.output_tokens,
-                    u.cache_read_tokens,
-                    u.cache_creation_tokens,
-                    u.data_source,
-                    u.provider_id,
-                    u.provider_name,
-                    u.requested_model,
-                    u.outbound_model,
-                    u.response_model,
-                    u.usage_status,
-                    u.status_code,
-                    u.outcome,
-                    u.duration_ms,
-                    u.attempt_count,
-                    u.degraded
-                FROM usage_records u
-                WHERE u.data_source = 'route'
-                   OR NOT EXISTS (
-                        SELECT 1
-                        FROM usage_records r
-                        WHERE r.data_source = 'route'
-                          AND r.usage_status IN ('complete', 'partial')
-                          AND NULLIF(TRIM(r.session_id), '') IS NOT NULL
-                          AND r.source = u.source
-                          AND r.session_id = u.session_id
-                          AND COALESCE(r.completed_at_ms, r.started_at_ms)
-                              BETWEEN u.started_at_ms - 120000 AND u.started_at_ms + 120000
-                          AND LOWER(COALESCE(r.outbound_model, r.response_model, r.requested_model, ''))
-                              = LOWER(COALESCE(u.response_model, u.pricing_model, ''))
-                          AND r.output_tokens = u.output_tokens
-                          AND (
-                              r.input_tokens = u.input_tokens
-                              OR r.input_tokens = u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens
-                              OR u.input_tokens = r.input_tokens + r.cache_read_tokens + r.cache_creation_tokens
-                          )
-                   );
-              ";
-fn migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            description: "create_projects_table",
-            sql: "CREATE TABLE IF NOT EXISTS projects (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                path        TEXT NOT NULL,
-                group_name  TEXT NOT NULL DEFAULT '',
-                sort_order  INTEGER NOT NULL DEFAULT 0,
-                cli_tool    TEXT NOT NULL DEFAULT '',
-                startup_cmd TEXT NOT NULL DEFAULT '',
-                env_vars    TEXT NOT NULL DEFAULT '{}',
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            )",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 2,
-            description: "create_command_templates_table",
-            sql: "CREATE TABLE IF NOT EXISTS command_templates (
-                id          TEXT PRIMARY KEY,
-                project_id  TEXT,
-                name        TEXT NOT NULL,
-                command     TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                sort_order  INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            )",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 3,
-            description: "create_groups_table_and_migrate",
-            sql: "
-                CREATE TABLE IF NOT EXISTS groups (
-                    id          TEXT PRIMARY KEY,
-                    name        TEXT NOT NULL,
-                    parent_id   TEXT,
-                    sort_order  INTEGER NOT NULL DEFAULT 0,
-                    created_at  TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY (parent_id) REFERENCES groups(id) ON DELETE CASCADE
-                );
-
-                ALTER TABLE projects ADD COLUMN group_id TEXT DEFAULT NULL REFERENCES groups(id) ON DELETE SET NULL;
-
-                INSERT INTO groups (id, name, parent_id, sort_order, created_at)
-                SELECT DISTINCT
-                    lower(hex(randomblob(16))),
-                    group_name,
-                    NULL,
-                    0,
-                    strftime('%s','now') * 1000
-                FROM projects
-                WHERE group_name != '' AND group_name IS NOT NULL;
-
-                UPDATE projects SET group_id = (
-                    SELECT g.id FROM groups g WHERE g.name = projects.group_name AND g.parent_id IS NULL
-                ) WHERE group_name != '' AND group_name IS NOT NULL;
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 4,
-            description: "create_command_history_table",
-            sql: "
-                CREATE TABLE IF NOT EXISTS command_history (
-                    id          TEXT PRIMARY KEY,
-                    project_id  TEXT,
-                    command     TEXT NOT NULL,
-                    executed_at TEXT NOT NULL,
-                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_command_history_project ON command_history(project_id);
-                CREATE INDEX IF NOT EXISTS idx_command_history_time ON command_history(executed_at DESC);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 5,
-            description: "add_shell_to_projects",
-            sql: "ALTER TABLE projects ADD COLUMN shell TEXT NOT NULL DEFAULT 'powershell';",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 6,
-            description: "create_session_meta_table",
-            sql: "
-                CREATE TABLE IF NOT EXISTS session_meta (
-                    session_key TEXT PRIMARY KEY,
-                    session_id  TEXT NOT NULL,
-                    source      TEXT NOT NULL,
-                    project_key TEXT NOT NULL,
-                    file_path   TEXT NOT NULL,
-                    alias       TEXT NOT NULL DEFAULT '',
-                    starred     INTEGER NOT NULL DEFAULT 0,
-                    tags_json   TEXT NOT NULL DEFAULT '[]',
-                    updated_at  TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_session_meta_source ON session_meta(source);
-                CREATE INDEX IF NOT EXISTS idx_session_meta_updated ON session_meta(updated_at DESC);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 7,
-            description: "create_sync_meta_table",
-            sql: "
-                CREATE TABLE IF NOT EXISTS sync_meta (
-                    id TEXT PRIMARY KEY DEFAULT 'singleton',
-                    device_id TEXT NOT NULL,
-                    last_sync_at TEXT,
-                    remote_version TEXT
-                );
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 8,
-            description: "add_secondary_indexes",
-            sql: "
-                CREATE INDEX IF NOT EXISTS idx_session_meta_project ON session_meta(project_key);
-                CREATE INDEX IF NOT EXISTS idx_projects_group ON projects(group_id);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 9,
-            description: "add_path_and_session_indexes",
-            sql: "
-                CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
-                CREATE INDEX IF NOT EXISTS idx_session_meta_file ON session_meta(file_path);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 10,
-            description: "create_ccusage_cache_table",
-            sql: "
-                CREATE TABLE IF NOT EXISTS ccusage_cache (
-                    cache_key   TEXT PRIMARY KEY,
-                    source      TEXT NOT NULL,
-                    report_kind TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    updated_at  INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_ccusage_cache_source ON ccusage_cache(source, report_kind);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 11,
-            description: "create_model_prices_table",
-            sql: "
-                CREATE TABLE IF NOT EXISTS model_prices (
-                    model                  TEXT PRIMARY KEY,
-                    input_per_1m           REAL NOT NULL DEFAULT 0,
-                    output_per_1m          REAL NOT NULL DEFAULT 0,
-                    cache_read_per_1m      REAL NOT NULL DEFAULT 0,
-                    cache_creation_per_1m  REAL NOT NULL DEFAULT 0,
-                    source                 TEXT NOT NULL DEFAULT 'manual',
-                    source_model_id        TEXT,
-                    raw_json               TEXT,
-                    updated_at_ms          INTEGER NOT NULL DEFAULT 0,
-                    synced_at_ms           INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_model_prices_source ON model_prices(source);
-            ",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 12,
-            description: "add_provider_overrides_to_projects",
-            sql: "ALTER TABLE projects ADD COLUMN provider_overrides TEXT NOT NULL DEFAULT '{}';",
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_VERSION,
-            description: MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_DESCRIPTION,
-            sql: MIGRATION_CREATE_SESSION_FAVORITE_SNAPSHOTS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_ADD_CLI_ARGS_VERSION,
-            description: MIGRATION_ADD_CLI_ARGS_DESCRIPTION,
-            sql: MIGRATION_ADD_CLI_ARGS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_ADD_WORKTREE_ISOLATION_VERSION,
-            description: MIGRATION_ADD_WORKTREE_ISOLATION_DESCRIPTION,
-            sql: MIGRATION_ADD_WORKTREE_ISOLATION_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_VERSION,
-            description: MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_DESCRIPTION,
-            sql: MIGRATION_ADD_WORKTREE_DEPS_PROMPT_SETTING_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_VERSION,
-            description: MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_DESCRIPTION,
-            sql: MIGRATION_ADD_WORKTREE_PROVIDER_OVERRIDES_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_HISTORY_EDIT_AUDIT_VERSION,
-            description: MIGRATION_CREATE_HISTORY_EDIT_AUDIT_DESCRIPTION,
-            sql: MIGRATION_CREATE_HISTORY_EDIT_AUDIT_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_REQUEST_LOGS_VERSION,
-            description: MIGRATION_CREATE_REQUEST_LOGS_DESCRIPTION,
-            sql: MIGRATION_CREATE_REQUEST_LOGS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_SSH_HOSTS_VERSION,
-            description: MIGRATION_CREATE_SSH_HOSTS_DESCRIPTION,
-            sql: MIGRATION_CREATE_SSH_HOSTS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_SSH_HOST_GROUPS_VERSION,
-            description: MIGRATION_CREATE_SSH_HOST_GROUPS_DESCRIPTION,
-            sql: MIGRATION_CREATE_SSH_HOST_GROUPS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_ADD_SSH_CONFIG_FILE_VERSION,
-            description: MIGRATION_ADD_SSH_CONFIG_FILE_DESCRIPTION,
-            sql: MIGRATION_ADD_SSH_CONFIG_FILE_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_VERSION,
-            description: MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_DESCRIPTION,
-            sql: MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_VERSION,
-            description: MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_DESCRIPTION,
-            sql: MIGRATION_EXTEND_SSH_AGENT_INSTALLATIONS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: provider::MIGRATION_LEGACY_PROVIDERS_VERSION,
-            description: provider::MIGRATION_LEGACY_PROVIDERS_DESCRIPTION,
-            sql: provider::MIGRATION_LEGACY_PROVIDERS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: provider::MIGRATION_CREATE_NATIVE_PROVIDERS_VERSION,
-            description: provider::MIGRATION_CREATE_NATIVE_PROVIDERS_DESCRIPTION,
-            sql: provider::MIGRATION_CREATE_NATIVE_PROVIDERS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_CREATE_USAGE_RECORDS_VERSION,
-            description: "create_unified_usage_records",
-            sql: MIGRATION_CREATE_USAGE_RECORDS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_VERSION,
-            description: "deduplicate_routed_session_usage",
-            sql: MIGRATION_RECREATE_UNIFIED_USAGE_RECORDS_SQL,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_VERSION,
-            description: "optimize_unified_usage_record_queries",
-            sql: MIGRATION_OPTIMIZE_UNIFIED_USAGE_RECORDS_SQL,
-            kind: MigrationKind::Up,
-        },
-    ]
-}
-
+// 读取硬件加速禁用偏好，路径、读取或解析失败时使用 false。
 fn load_disable_hardware_acceleration_setting() -> bool {
     let settings_path = match app_paths::cli_manager_data_dir() {
         Ok(dir) => dir.join("settings.json"),
@@ -951,6 +280,7 @@ fn load_disable_hardware_acceleration_setting() -> bool {
         .unwrap_or(false)
 }
 
+// 为所有窗口补入禁用 GPU 参数，保留已有浏览器参数。
 fn apply_webview_disable_gpu_config(config: &mut tauri::Config) {
     for window in &mut config.app.windows {
         let browser_args = window
@@ -968,6 +298,7 @@ fn apply_webview_disable_gpu_config(config: &mut tauri::Config) {
 }
 
 #[cfg(target_os = "windows")]
+// 用 Windows 消息框显示数据目录初始化错误及中英文提示。
 fn show_startup_error(error: &str) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -995,11 +326,13 @@ fn show_startup_error(error: &str) {
 }
 
 #[cfg(not(target_os = "windows"))]
+// 在非 Windows 平台将启动数据目录错误写入标准错误。
 fn show_startup_error(error: &str) {
     eprintln!("CLI-Manager data directory initialization failed: {error}");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// 准备数据目录并注册插件、状态、IPC 和后台初始化，运行桌面事件循环及退出清理。
 pub fn run() {
     if let Err(err) = app_paths::prepare_gui_startup() {
         show_startup_error(&err);
@@ -1127,6 +460,14 @@ pub fn run() {
                                     "pty daemon connected: 127.0.0.1:{}",
                                     client.info().port
                                 );
+                                if let Err(error) =
+                                    commands::routing::reconcile_persisted_service(client.clone())
+                                {
+                                    log::warn!(
+                                        "persisted local routing recovery skipped: {}",
+                                        error.code
+                                    );
+                                }
                                 handle.state::<daemon::client::DaemonBridge>().set(client);
                             }
                             Err(err) => log::warn!(
@@ -1144,6 +485,17 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_millis(750));
                     if let Err(err) = commands::cc_connect::auto_start(&handle) {
                         log::warn!("cc-connect auto-start skipped: {err}");
+                    }
+                    if let Err(err) = commands::web_device::auto_start(&handle) {
+                        log::warn!("web device auto-start skipped: {err}");
+                    }
+                    if let Err(err) = commands::web_server::auto_start(
+                        &handle,
+                        handle
+                            .state::<commands::web_server::WebServerManager>()
+                            .inner(),
+                    ) {
+                        log::warn!("managed Web server auto-start skipped: {err}");
                     }
                 });
             }
@@ -1211,8 +563,11 @@ pub fn run() {
         .manage(daemon::client::DaemonBridge::new())
         .manage(file_watcher::FileWatcherBridge::new())
         .manage(git_watcher::GitWatcherBridge::new())
+        .manage(live_server::LiveServerManager::new())
         .manage(commands::subagent_transcript::SubagentTranscriptBridge::new())
         .manage(commands::cc_connect::CcConnectManager::new())
+        .manage(commands::web_device::WebDeviceManager::new())
+        .manage(commands::web_server::WebServerManager::default())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             SqlBuilder::default()
@@ -1223,6 +578,35 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::agent_capabilities::agent_capabilities_inspect,
             commands::agent_capabilities::agent_capabilities_probe,
+            commands::extensions::extensions_mcp_capabilities,
+            commands::extensions::extensions_mcp_native_preview,
+            commands::extensions::extensions_mcp_native_status,
+            commands::extensions::extensions_mcp_set_selection,
+            commands::extensions::extensions_mcp_native_apply,
+            commands::extensions::extensions_mcp_validate,
+            commands::extensions::extensions_mcp_parse_native,
+            commands::extensions::extensions_mcp_preview,
+            commands::extensions::extensions_mcp_list,
+            commands::extensions::extensions_mcp_get,
+            commands::extensions::extensions_mcp_upsert,
+            commands::extensions::extensions_mcp_set_enabled,
+            commands::extensions::extensions_mcp_delete,
+            commands::extensions::extensions_import_preview,
+            commands::extensions::extensions_import_apply,
+            commands::extensions::extensions_skills_list_packages,
+            commands::extensions::extensions_skills_inventory,
+            commands::extensions::extensions_skills_list_installations,
+            commands::extensions::extensions_skills_deploy,
+            commands::extensions::extensions_skills_uninstall,
+            commands::extensions::extensions_skills_restore,
+            commands::extensions::extensions_github_skill_preview,
+            commands::extensions::extensions_github_skill_install,
+            commands::extensions::extensions_github_skill_cancel,
+            commands::extensions::extensions_project_policy_get,
+            commands::extensions::extensions_project_policy_save,
+            commands::extensions::extensions_project_policy_prepare,
+            commands::extensions::extensions_project_policy_release_snapshot,
+            commands::extensions::extensions_project_policy_gc_snapshots,
             commands::opencode_hook::opencode_hook_status,
             commands::opencode_hook::opencode_hook_install,
             commands::opencode_hook::opencode_hook_uninstall,
@@ -1274,6 +658,7 @@ pub fn run() {
             commands::ssh::ssh_resolve_user,
             commands::ssh::ssh_test_connection,
             commands::ssh::ssh_agent_probe,
+            commands::ssh::ssh_agent_available_release,
             commands::ssh::ssh_agent_install_preview,
             commands::ssh::ssh_agent_install,
             commands::ssh::ssh_agent_rollback,
@@ -1300,7 +685,17 @@ pub fn run() {
             commands::third_party_notification::third_party_notification_test_send,
             commands::logging::set_debug_logging,
             commands::logging::resource_diagnostics_write,
+            commands::live_server::live_server_start,
+            commands::live_server::live_server_status,
+            commands::live_server::live_server_stop,
             commands::fs::clipboard_read_file_paths,
+            commands::fs::clipboard_import::clipboard_get_revision,
+            commands::fs::clipboard_import::file_clipboard_write,
+            commands::fs::clipboard_import::file_clipboard_read,
+            commands::fs::clipboard_import::file_import_external,
+            commands::fs::clipboard_import::file_import_image,
+            commands::fs::clipboard_attach_image_files,
+            commands::fs::file_attach_image_data,
             commands::fs::check_paths_exist,
             commands::fs::file_get_path_kind,
             commands::fs::file_watch_start,
@@ -1323,6 +718,8 @@ pub fn run() {
             commands::fs::file_move,
             commands::shell::open_windows_terminal,
             commands::shell::open_folder_in_explorer,
+            commands::deepseek::deepseek_tui_preflight,
+            commands::deepseek::deepseek_tui_prepare_launch,
             commands::history::history_list_sessions,
             commands::history::history_get_session,
             commands::history::history_convert_session,
@@ -1358,12 +755,20 @@ pub fn run() {
             commands::ssh_files::ssh_remote_file_search,
             commands::ssh_files::ssh_remote_file_attach_data,
             commands::ssh_files::ssh_remote_file_attach_path,
+            commands::ssh_files::ssh_remote_file_put_path,
+            commands::ssh_files::ssh_remote_file_download,
+            commands::ssh_files::ssh_remote_file_delete,
+            commands::ssh_files::ssh_remote_file_attachment_root,
             commands::ssh_git::ssh_remote_git_request,
             commands::history::history_get_conversion_matrix,
             commands::history::history_refresh_index,
             commands::history::history_list_prompts,
             commands::history::history_list_stats_projects,
             commands::history::history_get_stats,
+            commands::history_title::history_title_list_providers,
+            commands::history_title::history_title_generate,
+            commands::history_title::history_title_clear,
+            commands::history_title::history_title_cancel,
             commands::history::request_logs::history_sync_request_logs,
             commands::history::request_logs::history_list_request_logs,
             commands::history::request_logs::history_get_request_log_stats,
@@ -1394,6 +799,31 @@ pub fn run() {
             commands::sync::sync_save_password,
             commands::sync::sync_load_password,
             commands::sync::sync_delete_password,
+            commands::web_device::web_device_get_status,
+            commands::web_device::web_device_save_profile,
+            commands::web_device::web_device_start,
+            commands::web_device::web_device_stop,
+            commands::web_device::web_device_restart,
+            commands::web_device::web_device_create_pairing,
+            commands::web_device::web_device_clear_pairing,
+            commands::web_device::web_device_take_operations,
+            commands::web_device::web_device_take_terminal_commands,
+            commands::web_device::web_device_terminal_output,
+            commands::web_device::web_device_terminal_status,
+            commands::web_device::web_device_publish_history,
+            commands::web_device::web_device_validate_context,
+            commands::web_device::web_device_operation_accepted,
+            commands::web_device::web_device_operation_running,
+            commands::web_device::web_device_operation_completed,
+            commands::web_device::web_device_mobile_ticket,
+            commands::web_conversation::web_conversation_start,
+            commands::web_conversation::web_conversation_is_running,
+            commands::web_conversation::web_conversation_history,
+            commands::web_server::web_server_get_status,
+            commands::web_server::web_server_save_config,
+            commands::web_server::web_server_start,
+            commands::web_server::web_server_stop,
+            commands::web_server::web_server_restart,
             commands::system_resources::system_resources_get_snapshot,
             commands::version::get_app_version,
             commands::version::get_os_platform,
@@ -1401,6 +831,9 @@ pub fn run() {
             app_open_devtools,
             app_paths::app_get_data_paths,
             commands::db_repair::db_repair_known_migration_drift,
+            commands::db_repair::db_backfill_request_log_project_paths,
+            commands::project_groups::project_group_save_binding,
+            commands::project_groups::project_group_delete,
             commands::fonts::list_system_fonts,
             commands::background::save_background_image,
             commands::background::cleanup_unused_backgrounds,
@@ -1410,6 +843,8 @@ pub fn run() {
             commands::hook_settings::hook_settings_uninstall,
             commands::hook_settings::hook_settings_install_codex,
             commands::hook_settings::hook_settings_uninstall_codex,
+            commands::hook_settings::hook_settings_install_kimi,
+            commands::hook_settings::hook_settings_uninstall_kimi,
             commands::hook_settings::hook_settings_install_pi,
             commands::hook_settings::hook_settings_uninstall_pi,
             commands::hook_settings::hook_settings_install_grok,
@@ -1486,6 +921,9 @@ pub fn run() {
             commands::git::git_get_changes,
             commands::git::git_list_repositories,
             commands::git::git_get_file_diff,
+            commands::git_history::git_list_commits,
+            commands::git_history::git_get_commit_detail,
+            commands::git_history::git_get_commit_file_diff,
             commands::git::git_fork_worktree_snapshot,
             commands::git::git_get_worktree_snapshot,
             commands::git::git_restore_worktree_snapshot,
@@ -1511,12 +949,50 @@ pub fn run() {
             commands::git::git_pull,
             commands::git::git_pull_abort,
             commands::git::git_rebase_continue,
+            commands::git::git_operation_continue,
+            commands::git::git_operation_abort,
+            commands::git::git_compare_refs,
+            commands::git::git_execute_operation,
+            commands::git_tools::git_list_tags,
+            commands::git_tools::git_get_commit_patch,
+            commands::git_tools::git_save_generated_patch,
+            commands::git_tools::git_list_stashes,
+            commands::git_tools::git_stash_create,
+            commands::git_tools::git_stash_action,
+            commands::git_tools::git_list_remotes,
+            commands::git_tools::git_remote_action,
+            commands::git_tools::git_push_tag,
+            commands::git_tools::git_delete_remote_branch,
+            commands::git_tools::git_force_push_with_lease,
+            commands::git_tools::git_list_reflog,
+            commands::git_tools::git_restore_reflog,
+            commands::git_tools::git_file_history,
+            commands::git_tools::git_blame_file,
+            commands::git_tools::git_bisect_status,
+            commands::git_tools::git_bisect_action,
+            commands::git_tools::git_list_submodules,
+            commands::git_tools::git_submodule_action,
+            commands::git_tools::git_rewrite_commits,
             commands::git::git_watch_start,
             commands::git::git_watch_stop,
             commands::git_worktree::git_worktree_validate,
             commands::git_worktree::git_worktree_create,
             commands::git_worktree::git_worktree_check_deps,
             commands::git_worktree::git_worktree_merge,
+            commands::git_worktree::git_worktree_force_merge,
+            commands::git_worktree::conflicts::recovery_commands::git_worktree_recovery_probe,
+            commands::git_worktree::conflicts::recovery_commands::git_worktree_recovery_recheck,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_probe_conflicts,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_prepare_conflicts,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_conflict_status,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_conflict_file,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_save_conflict_draft,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_take_conflict_side,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_resolve_conflict_file,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_continue_conflicts,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_abort_conflicts,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_recheck_conflicts,
+            commands::git_worktree::conflicts::conflict_commands::git_worktree_release_conflicts,
             commands::git_worktree::git_worktree_remove,
             commands::subagent_transcript::subagent_transcript_subscribe,
             commands::subagent_transcript::subagent_transcript_unsubscribe,
@@ -1526,6 +1002,8 @@ pub fn run() {
             commands::model_pricing::model_prices_sync,
             commands::system_notification::is_wsl,
             commands::system_notification::send_notification_via_windows,
+            commands::system_notification::validate_system_notification_sound,
+            commands::system_notification::play_system_notification_sound,
             commands::system_notification::send_interactive_system_notification,
             commands::system_notification::set_taskbar_attention,
             statusline::statusline_get_status,
@@ -1562,8 +1040,14 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = &event {
+                app.state::<live_server::LiveServerManager>().shutdown();
                 app.state::<commands::cc_connect::CcConnectManager>()
                     .shutdown();
+                commands::web_device::shutdown(app);
+                commands::web_server::shutdown(
+                    app.state::<commands::web_server::WebServerManager>()
+                        .inner(),
+                );
                 crash_reporter::mark_graceful_exit();
             }
 
@@ -1586,12 +1070,14 @@ pub fn run() {
 #[cfg(test)]
 mod ssh_migration_tests {
     use super::{
-        MIGRATION_ADD_SSH_CONFIG_FILE_SQL, MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL,
-        MIGRATION_CREATE_SSH_HOSTS_SQL, MIGRATION_CREATE_SSH_HOST_GROUPS_SQL,
+        MIGRATION_ADD_SSH_ATTACHMENT_ROOT_SQL, MIGRATION_ADD_SSH_CONFIG_FILE_SQL,
+        MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL, MIGRATION_CREATE_SSH_HOSTS_SQL,
+        MIGRATION_CREATE_SSH_HOST_GROUPS_SQL,
     };
     use sqlx::{Connection, Row, SqliteConnection};
 
     #[tokio::test]
+    // 在内存数据库验证 SSH 主机迁移的本地默认值及删除主机后的外键置空。
     async fn ssh_host_migration_preserves_local_defaults_and_foreign_keys() {
         let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON")
@@ -1655,6 +1141,7 @@ mod ssh_migration_tests {
     }
 
     #[tokio::test]
+    // 在内存数据库验证旧平面主机分组迁移为根分组并关联原主机。
     async fn ssh_group_migration_preserves_flat_groups_as_roots() {
         let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON")
@@ -1694,6 +1181,7 @@ mod ssh_migration_tests {
     }
 
     #[tokio::test]
+    // 在内存数据库验证删除主机保留集成身份元数据，同时级联删除偏好。
     async fn ssh_agent_integration_migration_preserves_rebind_metadata() {
         let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON")
@@ -1782,6 +1270,7 @@ mod ssh_migration_tests {
     }
 
     #[tokio::test]
+    // 在内存数据库验证新增 SSH 配置文件列为空串，表示沿用系统配置。
     async fn ssh_config_file_migration_defaults_existing_hosts_to_system_config() {
         let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
         sqlx::query(
@@ -1812,6 +1301,49 @@ mod ssh_migration_tests {
             .unwrap();
         assert_eq!(row.get::<String, _>("config_file"), "");
     }
+
+    #[tokio::test]
+    // 在内存数据库验证附件根默认空串且可写入自定义值，不访问远程缓存。
+    async fn ssh_attachment_root_migration_defaults_existing_hosts_to_agent_cache() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_SSH_HOSTS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO ssh_hosts (id, name, host, created_at, updated_at)
+             VALUES ('host-1', 'Server', 'example.com', '1', '1')",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(MIGRATION_ADD_SSH_ATTACHMENT_ROOT_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let row = sqlx::query("SELECT attachment_root FROM ssh_hosts WHERE id = 'host-1'")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("attachment_root"), "");
+
+        sqlx::query("UPDATE ssh_hosts SET attachment_root = '~/attachments' WHERE id = 'host-1'")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT attachment_root FROM ssh_hosts WHERE id = 'host-1'")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("attachment_root"), "~/attachments");
+    }
 }
 
 #[cfg(test)]
@@ -1820,8 +1352,23 @@ mod provider_migration_tests {
     use crate::provider::{
         MIGRATION_CREATE_NATIVE_PROVIDERS_VERSION, MIGRATION_LEGACY_PROVIDERS_VERSION,
     };
+    use crate::{
+        MIGRATION_ADD_GROUP_BOUND_PATH_VERSION, MIGRATION_ADD_NODE_APPEARANCE_VERSION,
+        MIGRATION_ADD_PROJECT_PATH_MODE_VERSION, MIGRATION_ADD_SSH_ATTACHMENT_ROOT_VERSION,
+        MIGRATION_ADD_USAGE_ERROR_DETAIL_VERSION,
+        MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION,
+        MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION,
+        MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION,
+        MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION,
+        MIGRATION_CREATE_EXTENSION_SKILLS_SQL,
+        MIGRATION_CREATE_EXTENSION_SKILLS_VERSION,
+        MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION,
+        MIGRATION_CREATE_MESSAGE_STARS_VERSION,
+        MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
+    };
 
     #[test]
+    // 验证旧供应商迁移与原生供应商迁移仍登记且版本顺序正确。
     fn registry_keeps_legacy_v25_before_native_v26() {
         let registry = migrations();
         let legacy = registry
@@ -1835,5 +1382,339 @@ mod provider_migration_tests {
         assert_eq!(legacy.description, "create_providers_and_keys_tables");
         assert_eq!(native.description, "create_native_provider_management");
         assert!(legacy.version < native.version);
+    }
+
+    #[test]
+    // 验证新增标题、用量路径、错误详情和项目设置迁移的版本、SQL 标记及顺序。
+    fn history_generated_titles_and_request_project_path_migrations_are_additive() {
+        let registry = migrations();
+        let title_migrations: Vec<_> = registry
+            .iter()
+            .filter(|migration| {
+                migration.version == MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION
+            })
+            .collect();
+        assert_eq!(title_migrations.len(), 1);
+        let title_migration = title_migrations[0];
+        assert_eq!(title_migration.version, 30);
+        assert!(title_migration
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS history_generated_titles"));
+        assert!(title_migration
+            .sql
+            .contains("idx_history_generated_titles_state"));
+        let project_path_migration = registry
+            .iter()
+            .find(|migration| {
+                migration.version == MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION
+            })
+            .expect("request project path migration must be registered");
+        assert_eq!(project_path_migration.version, 31);
+        assert!(project_path_migration
+            .sql
+            .contains("COALESCE(u.project_path, '') AS project_path"));
+        assert!(project_path_migration
+            .sql
+            .contains("idx_usage_records_project_path"));
+        let project_path_backfill = registry
+            .iter()
+            .find(|migration| {
+                migration.version == MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION
+            })
+            .expect("request project path backfill must be registered");
+        assert_eq!(project_path_backfill.version, 32);
+        assert!(project_path_backfill
+            .sql
+            .contains("UPDATE usage_records AS target"));
+        assert!(project_path_backfill
+            .sql
+            .contains("SELECT session.project_path"));
+        let error_detail_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_ADD_USAGE_ERROR_DETAIL_VERSION)
+            .expect("route usage error detail migration must be registered");
+        assert_eq!(error_detail_migration.version, 33);
+        assert!(error_detail_migration
+            .sql
+            .contains("ALTER TABLE usage_records ADD COLUMN error_detail TEXT"));
+        assert!(error_detail_migration.sql.contains("u.error_code"));
+        assert!(error_detail_migration.sql.contains("u.error_detail"));
+        let node_appearance_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_ADD_NODE_APPEARANCE_VERSION)
+            .expect("node appearance migration must be registered");
+        assert_eq!(node_appearance_migration.version, 34);
+        assert!(node_appearance_migration
+            .sql
+            .contains("ALTER TABLE groups ADD COLUMN icon TEXT"));
+        assert!(node_appearance_migration
+            .sql
+            .contains("ALTER TABLE projects ADD COLUMN color TEXT"));
+        assert!(title_migration.version < project_path_migration.version);
+        assert!(project_path_migration.version < project_path_backfill.version);
+        assert!(project_path_backfill.version < error_detail_migration.version);
+        assert!(error_detail_migration.version < node_appearance_migration.version);
+        let group_bound_path_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_ADD_GROUP_BOUND_PATH_VERSION)
+            .expect("group bound path migration must be registered");
+        assert_eq!(group_bound_path_migration.version, 35);
+        assert!(group_bound_path_migration
+            .sql
+            .contains("ALTER TABLE groups ADD COLUMN bound_path TEXT"));
+        let project_path_mode_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_ADD_PROJECT_PATH_MODE_VERSION)
+            .expect("project path mode migration must be registered");
+        assert_eq!(project_path_mode_migration.version, 36);
+        assert!(project_path_mode_migration
+            .sql
+            .contains("ALTER TABLE projects ADD COLUMN path_mode TEXT"));
+        let ssh_attachment_root_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_ADD_SSH_ATTACHMENT_ROOT_VERSION)
+            .expect("SSH attachment root migration must be registered");
+        assert_eq!(ssh_attachment_root_migration.version, 37);
+        assert!(ssh_attachment_root_migration
+            .sql
+            .contains("ALTER TABLE ssh_hosts ADD COLUMN attachment_root TEXT"));
+        assert!(node_appearance_migration.version < group_bound_path_migration.version);
+        assert!(group_bound_path_migration.version < project_path_mode_migration.version);
+        assert!(project_path_mode_migration.version < ssh_attachment_root_migration.version);
+        let extension_mcp_migration = registry
+            .iter()
+            .find(|migration| {
+                migration.version == MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION
+            })
+            .expect("extension MCP migration must be registered");
+        assert_eq!(extension_mcp_migration.version, 38);
+        assert!(extension_mcp_migration
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS extension_mcp_resources"));
+        assert!(extension_mcp_migration
+            .sql
+            .contains("idx_extension_mcp_resources_updated_at"));
+        let extension_skill_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_SKILLS_VERSION)
+            .expect("extension skill migration");
+        assert_eq!(
+            extension_skill_migration.description,
+            MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION
+        );
+        assert!(extension_mcp_migration.version < extension_skill_migration.version);
+        assert_eq!(extension_skill_migration.sql, MIGRATION_CREATE_EXTENSION_SKILLS_SQL);
+        assert!(extension_skill_migration
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS extension_skill_packages"));
+        assert!(extension_skill_migration
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS extension_skill_installations"));
+        let scope_policy_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION)
+            .expect("extension scope policy migration must be registered");
+        assert_eq!(scope_policy_migration.version, 40);
+        assert!(extension_skill_migration.version < scope_policy_migration.version);
+        let message_star_migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_CREATE_MESSAGE_STARS_VERSION)
+            .expect("message star migration must be registered");
+        assert!(scope_policy_migration.version < message_star_migration.version);
+        assert!(registry
+            .iter()
+            .all(|migration| migration.version <= message_star_migration.version));
+        assert!(registry.iter().any(|migration| migration.version == 29
+            && migration.description == "optimize_unified_usage_record_queries"));
+    }
+}
+
+#[cfg(test)]
+mod extension_scope_policy_migration_tests {
+    use super::{migrations, MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION};
+
+    #[test]
+    // 验证项目/Worktree 扩展策略迁移登记在 Skill 迁移之后且包含受约束的策略表。
+    fn scope_policy_migration_is_registered_after_extension_baseline() {
+        let registry = migrations();
+        let migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION)
+            .expect("extension scope policy migration must be registered");
+        assert_eq!(migration.version, 40);
+        assert_eq!(migration.description, "create_extension_scope_policies");
+        assert!(migration
+            .sql
+            .contains("PRIMARY KEY (scope_kind, scope_id, cli, extension_kind)"));
+        assert!(migration.sql.contains("CHECK(mode IN ('inherit', 'custom'))"));
+        assert!(migration.sql.contains("REFERENCES projects(id) ON DELETE CASCADE"));
+    }
+}
+
+#[cfg(test)]
+mod message_star_migration_tests {
+    use super::{
+        migrations, MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION, MIGRATION_CREATE_MESSAGE_STARS_SQL,
+        MIGRATION_CREATE_MESSAGE_STARS_VERSION,
+    };
+
+    #[test]
+    // 验证回答星标表迁移登记在扩展策略迁移之后，且按会话键与回答序号唯一。
+    fn message_star_migration_is_registered_after_extension_scope_policies() {
+        let registry = migrations();
+        let migration = registry
+            .iter()
+            .find(|migration| migration.version == MIGRATION_CREATE_MESSAGE_STARS_VERSION)
+            .expect("message star migration must be registered");
+        assert_eq!(migration.version, 41);
+        assert_eq!(migration.description, MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION);
+        assert_eq!(migration.sql, MIGRATION_CREATE_MESSAGE_STARS_SQL);
+        assert!(migration
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS message_stars"));
+        assert!(migration.sql.contains("PRIMARY KEY (session_key, message_index)"));
+        assert!(migration
+            .sql
+            .contains("idx_message_stars_session ON message_stars(session_key)"));
+    }
+}
+
+#[cfg(test)]
+mod request_log_project_path_migration_tests {
+    use super::{
+        MIGRATION_ADD_USAGE_ERROR_DETAIL_SQL, MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL,
+        MIGRATION_CREATE_REQUEST_LOGS_SQL, MIGRATION_CREATE_USAGE_RECORDS_SQL,
+        MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL,
+    };
+    use sqlx::{Connection, Row, SqliteConnection};
+
+    #[tokio::test]
+    // 在内存数据库重复执行路径回填，验证唯一匹配、歧义保留和已有值不覆盖。
+    async fn materialized_project_path_migration_backfills_legacy_rows_idempotently() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                environment_type TEXT NOT NULL DEFAULT 'local'
+             )",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects(id, name, path, environment_type) VALUES
+                ('project-a', 'Configured Project', 'D:\\Work\\Project-A', 'local'),
+                ('duplicate-a', 'Duplicate A', 'D:\\Work\\One\\Duplicate', 'local'),
+                ('duplicate-b', 'Duplicate B', 'E:\\Work\\Two\\Duplicate', 'wsl'),
+                ('remote', 'Project-A', '', 'ssh')",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_REQUEST_LOGS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_USAGE_RECORDS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_records(
+                record_id, logical_request_id, data_source, source, session_id,
+                project_key, project_path, started_at_ms, created_at_ms, updated_at_ms
+             ) VALUES
+                ('absolute', 'absolute', 'session_log', 'grok', 'session-absolute',
+                 '/mnt/d/Work/App/', NULL, 1, 1, 1),
+                ('configured', 'configured', 'session_log', 'codex', 'session-configured',
+                 'Project-A', NULL, 2, 2, 2),
+                ('ambiguous', 'ambiguous', 'session_log', 'codex', 'session-ambiguous',
+                 'Duplicate', NULL, 3, 3, 3),
+                ('existing', 'existing', 'session_log', 'opencode', 'session-existing',
+                 'Existing', 'keep/me', 4, 4, 4),
+                ('route', 'route', 'route', 'codex', 'session-configured',
+                 'Project-A', NULL, 5, 5, 5)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        for statement in MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_SQL.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&mut conn).await.unwrap();
+            }
+        }
+        for _ in 0..2 {
+            for statement in MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL.split(';') {
+                let statement = statement.trim();
+                if !statement.is_empty() {
+                    sqlx::query(statement).execute(&mut conn).await.unwrap();
+                }
+            }
+        }
+
+        let rows = sqlx::query("SELECT record_id, project_path FROM usage_records")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        let project_path = |record_id: &str| {
+            rows.iter()
+                .find(|row| row.get::<String, _>("record_id") == record_id)
+                .and_then(|row| row.get::<Option<String>, _>("project_path"))
+        };
+        assert_eq!(project_path("absolute").as_deref(), Some("/mnt/d/work/app"));
+        assert_eq!(
+            project_path("configured").as_deref(),
+            Some("d:/work/project-a")
+        );
+        assert_eq!(project_path("route").as_deref(), Some("d:/work/project-a"));
+        assert_eq!(project_path("ambiguous"), None);
+        assert_eq!(project_path("existing").as_deref(), Some("keep/me"));
+    }
+
+    #[tokio::test]
+    // 在内存数据库验证错误详情迁移保留旧错误码并重建含空详情的统一视图。
+    async fn route_usage_error_detail_migration_preserves_legacy_rows_and_rebuilds_view() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_REQUEST_LOGS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(MIGRATION_CREATE_USAGE_RECORDS_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_records(
+                record_id, logical_request_id, data_source, source, error_code,
+                started_at_ms, created_at_ms, updated_at_ms
+             ) VALUES ('route-error', 'route-error', 'route', 'codex',
+                       'routing_upstream_timeout', 1, 1, 1)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(MIGRATION_ADD_USAGE_ERROR_DETAIL_SQL)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let row = sqlx::query(
+            "SELECT error_code, error_detail
+             FROM unified_usage_records
+             WHERE request_id = 'route-error'",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("error_code").as_deref(),
+            Some("routing_upstream_timeout")
+        );
+        assert_eq!(row.get::<Option<String>, _>("error_detail"), None);
     }
 }

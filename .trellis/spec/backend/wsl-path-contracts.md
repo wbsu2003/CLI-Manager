@@ -66,6 +66,14 @@ pub async fn ccusage_install_tools(
 
 ## 3. Contracts
 
+### WSL external terminal launch (V1.4.1)
+
+- `shell_commands::push_tab_args` routes only the exact built-in `wsl` key to its dedicated Windows Terminal argument builder. Other shell branches keep their existing arguments.
+- WSL UNC cwd supplies `--distribution <distro> --cd <linux-path>` to `wsl.exe`; drive paths use `windows_path_to_wsl`, and Linux paths use the default distro. Do not pass the guest cwd as Windows Terminal `-d` or interpolate it into a script.
+- Nonempty startup commands run through `--exec bash --login -i -c`; a newline followed by `exec bash --login -i` retains an interactive terminal after the command. Empty commands preserve WSL's default shell.
+- Escape semicolons as `\;` in WSL tab arguments for Windows Terminal to restore; keep the outer multi-tab `;` delimiter separate. Never send PowerShell `-Command` to WSL.
+- Regression coverage must include WSL UNC variants, explicit/default distro, drive/Linux/empty cwd, quoted paths/commands, mixed tabs and exact non-WSL argument vectors. Run `cargo test --lib commands::shell::tests` on Windows.
+
 ### Plan 9 文件系统限制
 
 | 操作 | Windows 原生 API | WSL UNC 路径行为 | 规避方式 |
@@ -410,3 +418,10 @@ if should_register_codex_state_db(&state_db_path) {
     register_codex_thread_native(...).await?;
 }
 ```
+
+
+## History resume launch boundary (TEMP, 2026-09-07)
+
+History resume resolves source UNC/raw pointers, cwd and selected project/worktree into a single distro and canonical UNC cwd. Reject conflicting or missing WSL identity rather than silently selecting the default distro. Match Linux paths case-sensitively and do not fall back to project names across distros. Source CLI homes take precedence over selected project homes; an OpenCode database directory is not its config home.
+
+The shared Windows PTY launcher translates WSL cwd into argument-vector `--distribution <distro> --cd <linux-path>` and leaves the Windows process cwd unset. Preflight `wsl.exe --exec test -d` with a bounded timeout; emit stable `history_resume_wsl_*` errors. Never give a Linux cwd to CreateProcessW or concatenate cwd into a shell command. Native Windows, Linux/macOS and SSH retain their existing launch paths. Existing resume capabilities are Claude/Codex/Pi/Grok/Kimi/OpenCode; other source entries remain unsupported.

@@ -36,7 +36,9 @@ app_prepare_data_dir_switch(
 - A custom directory is the data root itself; never append `.cli-manager` or `data`.
 - `app_get_data_paths` keeps its existing response fields and dev/install file-name isolation. All consumers obtain the selected root through `cli_manager_data_dir()`.
 - A prepared switch is pending until the next normal GUI startup. Hook, statusline, and daemon helper entrypoints read only the active root and never execute migration.
-- Automatic migration copies the complete source tree into a target-sibling temporary directory, rejects links/reparse points, and activates it with rename only after the copy succeeds. The source is retained for recovery.
+- Automatic migration copies the complete persistent source tree into a target-sibling temporary directory, rejects links/reparse points, and activates it with rename only after the copy succeeds. The source is retained for recovery.
+- The only runtime-node exception is the exact source-root-relative `remote-manager/data/run/api.sock`, confirmed as a native AF_UNIX socket (Windows tag `0x80000023`) and refusing connections. Skip that stopped endpoint without deleting it; the service recreates it under the next root. Same-name regular files/directories are copied. Real links/junctions, unknown socket paths, listening endpoints, or uncertain probes must never be silently skipped.
+- Switch preparation holds the cc-connect operation idle guard until pending state is saved; starting/tracked processes, running Weixin authorization, busy operations, or poisoned state reject the request. No service is started/stopped or authorization canceled by this guard. Existing daemon session checks remain in force.
 - Automatic migration is allowed only when the target is empty. Direct use may select an existing non-empty directory but never merges or overwrites it.
 - Windows path canonicalization may produce a `\\?\\` verbatim prefix; normalize it back to a regular drive or UNC path before serializing `dbUrl`, otherwise SQLx treats `?` as the start of query parameters.
 - Hook diagnostics use `app_paths::logs_dir()`. Managed desktop-pet assets are scoped dynamically to `<data-root>/pets`; `$HOME/.codex/pets` remains external and unchanged.
@@ -53,6 +55,10 @@ app_prepare_data_dir_switch(
 | Copy or activation fails | Keep the previous `customDataDir`, clear pending state, and persist `lastError`. |
 | Explicit active custom root is unavailable at GUI startup | Stop before logs/SQLite/Store initialization and show a startup error; never silently fall back. |
 | Alive daemon session exists | Reject switch with `data_storage_tasks_active`; never terminate it automatically. |
+| cc-connect is starting/running, QR authorization is running, or a management operation is busy | Reject switch with `data_storage_tasks_active` before persisting pending state; do not stop the task. |
+| Exact owned socket is confirmed stopped | Omit only this runtime node from the copied tree; retain the source socket and all persistent data. |
+| Owned socket is listening or connect is still in progress | Reject migration with `data_storage_tasks_active`; do not activate the target. |
+| Owned socket probe is uncertain or fails | Reject with `data_storage_runtime_socket_probe_failed`; keep the previous root. |
 
 ### 5. Good/Base/Bad Cases
 
@@ -67,6 +73,9 @@ app_prepare_data_dir_switch(
 - Rust tests for distribution precedence and portable/standalone default paths.
 - Rust tests for Bootstrap path placement and previous-root retention after pending-switch failure.
 - Rust tests for complete-tree migration, non-empty target rejection, and parent/child overlap rejection.
+- Native socket tests for closed/listening endpoints, unknown-path sockets, same-name regular file/directory, exact-root boundaries, and Windows case-insensitive matching. Native Windows junctions at the socket or a parent directory remain rejected without traversing external contents; Unix symlinks remain rejected.
+- cc-connect tests for idle-guard lifetime, concurrent operations, starting state, poisoned locks, owned running processes, and running authorization. Temporary test processes must remain alive on rejection and be cleaned up only by their own test job.
+- `node --test scripts/dataStorageMigration.test.mjs` checks the actual settings error mapper, both language dictionaries, persisted-error rendering and the real IPC guard ordering; renderer parameters remain unchanged.
 - Windows tests must cover verbatim drive/UNC prefix stripping and parsing the resulting absolute path as a SQLite URL.
 - `cargo test --manifest-path src-tauri/Cargo.toml app_paths --lib` and `cargo check` after backend changes.
 - `npx tsc --noEmit` after changing storage IPC/UI types.
@@ -105,6 +114,7 @@ pub fn cli_manager_data_dir() -> Result<PathBuf, String> {
 - Default installed data directory: `<home>/.cli-manager`; Windows portable default: `<exe-dir>/data`; an explicit custom root replaces either default.
 - Stable store files: `settings.json`, production `sessions.json`, development `sessions.dev.json`, `sync-config.json`, `external-session-sync.json`.
 - Stable SQLite DB: `cli-manager.db`.
+- Stable machine identity: `machine-id`; installed Web profile: `web-device.json`; development Web profile: `web-device.dev.json`.
 - History index cache: production `history-cache`, development `history-cache-dev`.
 
 ### 3. Contracts
@@ -112,6 +122,7 @@ pub fn cli_manager_data_dir() -> Result<PathBuf, String> {
 - All durable CLI-Manager user data must resolve under the startup-selected data root, not versioned or identifier-dependent Tauri data folders.
 - `app_get_data_paths().sessionsStorePath` must use `sessions.dev.json` under Tauri `cfg(dev)` and `sessions.json` otherwise. Other stores remain shared unless another contract explicitly isolates them.
 - History index caches must use `history-cache-dev` under Tauri `cfg(dev)` and `history-cache` otherwise, so installed and development apps can run concurrently without competing over catalog activation/index runs.
+- Installed and development Web bridges must use separate profile files and software `clientId` values. They share only `machine-id`, so both builds can run concurrently without replacing each other's WebSocket generation, pairing token, or workspace snapshot.
 - Legacy store migration continues to migrate `sessions.json` as production user data. It must not copy production or legacy sessions into `sessions.dev.json`.
 - Store migration from legacy Tauri app data must be non-destructive:
   - copy the legacy store file when the target file is missing;
@@ -122,6 +133,10 @@ pub fn cli_manager_data_dir() -> Result<PathBuf, String> {
 - Legacy SQLite DB recovery may copy the legacy DB family only when the legacy DB has user rows and the current DB has no user rows.
 - SQLite DB family operations must include `cli-manager.db`, `cli-manager.db-wal`, and `cli-manager.db-shm`.
 - Current DB user data always wins over legacy DB user data.
+- `db_repair_known_migration_drift` runs before the frontend SQL plugin opens the database. For
+  known additive columns such as `ssh_hosts.attachment_root`, it repairs the physical column and
+  the `_sqlx_migrations` marker independently, so either side may be missing without causing a
+  later `no such column` or duplicate-`ADD COLUMN` failure.
 
 ### 4. Validation & Error Matrix
 
@@ -139,6 +154,9 @@ pub fn cli_manager_data_dir() -> Result<PathBuf, String> {
 | Legacy DB has rows and current DB has none | Backup current DB family, copy legacy DB family. |
 | Current DB has any user rows | Do not copy legacy DB. |
 | Recovery fails | Log warning and continue normal migration repair. |
+| `ssh_hosts.attachment_root` is missing while migration 37 is registered | Add the column before `Database.load`; do not insert a duplicate marker. |
+| `ssh_hosts.attachment_root` exists while migration 37 is missing | Register migration 37 with the exact SQL checksum; do not replay `ALTER TABLE`. |
+| Both the column and migration 37 are missing | Add the column and register migration 37 in one short transaction; rollback both on failure. |
 
 ### 5. Good/Base/Bad Cases
 
@@ -155,6 +173,9 @@ pub fn cli_manager_data_dir() -> Result<PathBuf, String> {
 - Rust unit test for development/installed session store file-name selection.
 - Rust unit test for development/installed history cache directory selection.
 - Rust unit tests for legacy DB recovery when current DB has no user rows and rejection when current DB has user rows.
+- Rust unit tests for additive-column drift with the column missing, the marker missing, both missing,
+  and a second idempotent repair; the assertion must inspect both `PRAGMA table_info` and
+  `_sqlx_migrations`.
 - `cargo check` after backend path or DB repair changes.
 - `cargo test --lib` or focused `cargo test app_paths db_repair --lib` after persistence migration changes.
 - `npx tsc --noEmit` after changing frontend path payloads or store consumers.
@@ -188,17 +209,29 @@ The migration copies missing files and otherwise merges only missing JSON object
 
 ```rust
 file_attach_data(file_name: String, data_base64: String) -> Result<String, String>
+clipboard_attach_image_files() -> Result<ClipboardImageAttachments, String>
 file_cleanup_expired_attachments() -> Result<u64, String>
+
+ClipboardImageAttachments {
+  paths: Vec<String>,
+  had_files: bool,
+  rejected_count: usize,
+  rejection_code: Option<String>,
+}
 ```
 
 - Stable attachment directory: `<home>/.cli-manager/attachments`.
 - `file_attach_data` returns the generated file's absolute native path.
+- `clipboard_attach_image_files` reads Windows `CF_HDROP` itself and returns only generated PNG attachment paths; it accepts no renderer-supplied path.
 
 ### 3. Contracts
 
 - Resolve the attachment root through `app_paths::cli_manager_data_dir()`; do not accept a project path or terminal cwd from the WebView.
 - Keep attachment file-name sanitization, collision suffixes, the 5 MiB decoded-data limit, and the 2-day retention period in Rust.
 - The frontend passes only `fileName` and `dataBase64`, then applies the existing shell-specific quoting to the returned absolute path.
+- `Alt+V` uses the host clipboard bridge. Clipboard bitmap data and supported copied image files are normalized to PNG; WSL shells translate generated drive paths to `/mnt/<drive>/...` before quoting.
+- Copied image files are limited to 8 regular non-symlink files, 5 MiB input/output each and 12,000,000 pixels. Supported decoder inputs are PNG/APNG, JPEG/JFIF, GIF first frame, WebP, BMP/DIB, TIFF and ICO. HEIC/HEIF and currently undecodable SVG/AVIF fail closed.
+- AI CLI image paths use the capability mode in `CLI_TOOL_DESCRIPTORS`: native path, `@path`, Aider `/add path`, or unsupported. Do not infer image support for arbitrary custom commands.
 - Attachment cleanup targets the same global directory and runs at most once per frontend process unless a cleanup attempt fails.
 - Existing project-scoped `.cli-manager/attachments` directories are not migrated or deleted automatically.
 
@@ -213,6 +246,10 @@ file_cleanup_expired_attachments() -> Result<u64, String>
 | Data or attachment directory is a symlink/reparse point or not a directory | Return `path_is_symlink` / `path_not_directory`. |
 | Sanitized name already exists | Add a numeric suffix without overwriting the existing file. |
 | Attachment directory does not exist during cleanup | Return `0`. |
+| CF_HDROP is absent | Return `hadFiles=false` so the frontend may try clipboard bitmap data. |
+| Clipboard file has an unsupported extension, is corrupt, or is not regular | Reject it and return a stable `rejectionCode`; never return its source path. |
+| Clipboard image exceeds 5 MiB or 12,000,000 pixels | Return `clipboard_image_too_large` / `image_dimensions_too_large`. |
+| Current CLI has no image paste capability | Show localized `clipboard_image_tool_unsupported` feedback and paste no path. |
 
 ### 5. Good/Base/Bad Cases
 
@@ -221,6 +258,8 @@ file_cleanup_expired_attachments() -> Result<u64, String>
 - Good: cleanup skips directories, symlinks, and files newer than 2 days.
 - Bad: accepting `rootPath` from the frontend and recreating `<project>/.cli-manager/attachments`.
 - Bad: returning a project-relative path that the frontend must join with project or session state.
+- Good: a Windows attachment path returned to a WSL terminal is pasted as a quoted `/mnt/c/...` path.
+- Bad: accepting a clipboard file path argument from the WebView or sending a rejected host path to WSL.
 
 ### 6. Tests Required
 
@@ -228,6 +267,8 @@ file_cleanup_expired_attachments() -> Result<u64, String>
 - Rust tests preserve attachment name sanitization, collision handling, decoded-size limits, and cleanup retention behavior when those helpers change.
 - Run `cargo check` after changing the Rust IPC contract.
 - Run `npx tsc --noEmit` after changing the frontend invoke payload or returned-path handling.
+- Rust tests cover common extension aliases and verify BMP input becomes a PNG attachment with preserved dimensions.
+- `scripts/wslImagePaste.test.mjs` asserts the `Alt+V` bridge, capability tiers and WSL path conversion remain wired.
 
 ### 7. Wrong vs Correct
 
@@ -244,5 +285,7 @@ This leaks project/session state into an app-owned persistence decision and crea
 ```typescript
 const absolutePath = await invoke<string>("file_attach_data", { fileName, dataBase64 });
 ```
+
+For copied files, the correct boundary is `invoke("clipboard_attach_image_files")` with no path arguments. Passing `{ path }` would expose an arbitrary host-file read primitive to the renderer.
 
 Rust owns the stable app-data path and returns the complete path required by the terminal.

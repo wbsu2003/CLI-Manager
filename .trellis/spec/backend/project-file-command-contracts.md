@@ -14,7 +14,7 @@
 
 ### 2. Signatures
 
-Backend commands in `src-tauri/src/commands/fs.rs`:
+Backend commands in `src-tauri/src/features/files/commands.rs`:
 
 ```rust
 file_watch_start(project_path: String) -> Result<(), String>
@@ -61,6 +61,7 @@ ProjectFilesChangedPayload { project_path: String, changed_paths: Vec<String> }
 - The project-creation WSL symlink picker must filter entries to `kind === "directory" && isSymlink === true`; ordinary directories remain visible in the normal project file browser but are not shown in the symlink picker.
 - `file_read_text` only returns UTF-8 text and rejects files larger than 1 MiB; known video extensions are rejected before reading bytes. This stable command remains the internal Replay/sync file contract.
 - `file_read_project_text` is the user-project editor command. It detects UTF-8/BOM, UTF-16 BOM, and common legacy encodings, rejects binary/undecodable content, and returns canonical encoding plus BOM metadata.
+- Video-extension eligibility is mirrored by the frontend precheck, local file command, and SSH Agent. The three lists must stay semantically aligned: TypeScript `.ts` is source text for project preview and must reach normal decoding rather than return `video_preview_unsupported`; a genuinely binary `.ts` payload is still handled by the existing binary/decode guard.
 - `file_write_text` keeps its existing UTF-8 signature and behavior for internal data.
 - `file_write_project_text` strictly encodes with the metadata returned by `file_read_project_text`; it must preserve BOM policy and reject unmappable characters instead of replacing them or silently converting to UTF-8.
 - `file_read_image` returns base64 plus MIME type, but must reject images larger than 5 MiB before reading bytes. JPEG/PNG/GIF/WebP/BMP dimensions are read before Base64 conversion and raster images above 12,000,000 pixels are rejected. SVG remains size-bounded without a raster pixel check.
@@ -68,6 +69,8 @@ ProjectFilesChangedPayload { project_path: String, changed_paths: Vec<String> }
 - `file_search_content` scans supported user-project text encodings within the project root, skips large/binary/undecodable files and common binary extensions, and returns at most one representative match per file with 1-based line numbers and bounded context snippets.
 - `overwrite=false` must return `target_exists` when the destination exists.
 - `overwrite=true` may replace the target after Rust revalidates the destination stays inside root.
+- `file_delete` and `file_move` reject symlink/reparse components in the source relative path before canonicalizing it; otherwise a source link could be dereferenced and its target destructively operated on. The selected project root itself remains canonicalized normally.
+- The frontend skips same-parent moves. Direct same-source commands retain the existing `source_equals_target` rejection. Moving over an ancestor containing the source is rejected before any destination removal.
 
 ### 4. Validation & Error Matrix
 
@@ -85,9 +88,12 @@ ProjectFilesChangedPayload { project_path: String, changed_paths: Vec<String> }
 | Child name contains path separator | `name_contains_separator` |
 | Delete target is root | `cannot_delete_root` |
 | Copy/move directory into itself | `target_inside_source` |
+| Delete/move source has a symlink/reparse component | `path_is_symlink` |
+| Move destination is an ancestor of the source | `target_contains_source` |
 | Destination exists without overwrite | `target_exists` |
 | Text file is too large | `file_too_large` |
 | Text path has a known video extension | `video_preview_unsupported` |
+| TypeScript `.ts` source path | normal text decode; never `video_preview_unsupported` solely because of the extension |
 | Text file is not UTF-8 | `not_utf8` |
 | Project text file is binary | `binary_file` |
 | Project text encoding cannot be decoded | `text_decode_failed` |
@@ -107,8 +113,9 @@ ProjectFilesChangedPayload { project_path: String, changed_paths: Vec<String> }
 - Good: `file_search_content(rootPath, "invoke")` returns bounded `{ path, line_number, line_text, before, after }` snippets for UTF-8 project files, with duplicate hits in the same file collapsed to the first match.
 - Good: `file_watch_start(projectPath)` uses a debounced recursive watcher for local Windows paths and returns a stable error such as `wsl_watch_unsupported` when notify cannot be used.
 - Good: watcher events for `src/main.ts` emit `changedPaths: ["src/main.ts"]`, allowing the frontend to refresh `src` instead of every expanded directory.
-- Base: `file_write_text(rootPath, "src/App.tsx", content)` writes only if `src` remains inside `rootPath`.
+- Base: `file_write_text(rootPath, "src/app/App.tsx", content)` writes only if `src` remains inside `rootPath`.
 - Good: `file_read_project_text` opens GBK or UTF-16 BOM source files and `file_write_project_text` writes them back with the same encoding/BOM.
+- Good: local and SSH `src/main.ts` source files bypass video classification and return text; `clip.mp4` remains rejected before content reading on both paths.
 - Good: the frontend rejects a known oversized entry before invoking Rust; Rust repeats size and pixel checks for search results with unknown size and direct IPC calls.
 - Bad: reading or Base64-encoding a video, oversized file, or oversized raster image before enforcing its preview limit.
 - Bad: an unmappable character in a legacy-encoded file is replaced with `?` or triggers an implicit UTF-8 conversion.
@@ -132,6 +139,7 @@ ProjectFilesChangedPayload { project_path: String, changed_paths: Vec<String> }
 - Unit-test project text read/write preserves GBK bytes and leaves the file unchanged when saving unmappable content.
 - Unit-test shared encoding logic covers UTF-8 BOM, UTF-16 LE/BE BOM, legacy encoding detection, binary rejection, and strict encoding failure.
 - Unit-test the exact 12,000,000-pixel boundary and rejection above it; assert known video extensions are rejected before content decoding.
+- Regression-test the extension collision across both readers: local and SSH `.ts` source must decode as text while `.mp4` still returns `video_preview_unsupported`.
 - Unit-test watcher path filtering keeps project-relative paths stable and ignores generated/noisy directories.
 - Focused frontend tests cover nested bare-directory rules, root-anchored rules, wildcards, negation, directory-only matching, fallback defaults, and `.gitignore` watcher-path detection.
 - Focused frontend tests cover case-distinct directory names for Windows, regular UNC, WSL UNC, and POSIX project paths.
@@ -193,3 +201,84 @@ const matches = await invoke<ProjectFileContentMatch[]>("file_search_content", {
 ```
 
 Rust owns traversal, root validation, skipped directories, file-size limits, UTF-8 checks, and result caps.
+
+#### Wrong
+
+```text
+Frontend allows .ts → local or SSH reader still rejects .ts as video
+```
+
+#### Correct
+
+```text
+Frontend precheck, local is_video_path, and SSH is_video all treat .ts as text;
+binary or undecodable content is rejected by the existing decode guard.
+```
+
+---
+
+## Scenario: Built-in Live Server
+
+### 1. Scope / Trigger
+
+- Trigger: a local project or Worktree `.html` / `.htm` context-menu action.
+- Boundary: Rust serves only canonical files below the selected project root; the frontend eligibility check is not a security boundary.
+- Non-goal: no framework command, dependency install, directory listing, backend proxy, SSH/WSL access, or external Live Server fallback.
+
+### 2. Signatures
+
+```rust
+live_server_start(project_path: String, relative_path: String) -> Result<LiveServerOpenResult, String>
+live_server_status(project_path: String) -> Result<Option<LiveServerSession>, String>
+live_server_stop(project_path: String) -> Result<bool, String>
+
+LiveServerSession { project_path: String, origin: String, port: u16 }
+LiveServerOpenResult { session: LiveServerSession, url: String, reused: bool }
+```
+
+### 3. Contracts
+
+- Bind exactly `127.0.0.1:0`; return the OS-assigned port and reuse one session per normalized project path.
+- Accept only `GET` and `HEAD`, require `Host: 127.0.0.1:<bound-port>`, and return `Cache-Control: no-store` plus `X-Content-Type-Options: nosniff`.
+- Reserve `/__cli_manager_live_server__/version`; injected HTML polls it every 400 ms and reloads after the debounced watcher advances the version.
+- Relative entry/request paths use forward slashes, reject absolute/current/parent/backslash segments, percent-decode before validation, and must canonicalize below the canonical root.
+- Start requires an existing `.html` / `.htm` file. Request `/` and in-root directories resolve to `index.html`; there is no directory listing.
+- MIME types come from `mime_guess`. HTML receives the reload client before a case-insensitive `</body>`, or appended when no close tag exists.
+- A 250 ms recursive watcher ignores VCS/generated high-churn directories. Stop drops the watcher and listener owner; `RunEvent::Exit` clears all sessions.
+- Browser-opener failure is returned to the UI as `browser_open_failed` after the backend session is recorded; no alternate browser/runtime is attempted.
+
+### 4. Validation & Error Matrix
+
+| Condition | Error / response |
+|---|---|
+| Invalid root | `root_not_absolute` / `root_canonicalize_failed` / `root_not_directory` |
+| Invalid relative entry | `path_contains_*` / `path_is_absolute` |
+| Missing or non-HTML entry | `entry_not_found` / `entry_not_html` |
+| Canonical escape | `path_outside_root` |
+| Listener or watcher setup failure | `listener_*` / `watcher_init_failed` / `watch_failed` |
+| Unexpected Host / method | HTTP `403` / `405` |
+| Missing served file | HTTP `404` |
+
+### 5. Required Tests
+
+- Validate Unicode/space URL encoding, nested index resolution, traversal/backslash rejection, and canonical containment.
+- Validate case-insensitive HTML injection with and without `</body>`.
+- Validate generated-directory watcher filtering and relevant in-root changes.
+- Start a real loopback listener; assert static response, exact Host behavior, same-root reuse, stop, and listener shutdown.
+
+## Explicit external clipboard imports (TEMP, 2026-09-14)
+New commands live in `src-tauri/src/features/files/commands/clipboard_import.rs`; existing filesystem and terminal attachment signatures stay stable.
+
+```rust
+clipboard_get_revision() -> Option<u32>
+file_clipboard_read(app: AppHandle, known_revision: Option<u32>) -> Result<ClipboardSnapshot, String>
+file_import_external(root_path: String, source_path: String, target_parent_path: String, name: String, overwrite: bool, protected_source_paths: Vec<String>) -> Result<(), String>
+file_import_image(root_path: String, target_parent_path: String, name: String, data_base64: String, overwrite: bool) -> Result<(), String>
+```
+- Snapshot serializes `{ unchanged, entries: [{ path, name, kind, isSymlink, dataBase64 }] }`; `dataBase64=null` means absolute native source path. Screenshot identities are `clipboard-image:<uuid>` and names are unique timestamped PNGs.
+- Windows uses native sequence numbers and CF_HDROP handles; `DragQueryFileW` receives the handle, never the GlobalLock pointer. Clipboard acquisition is bounded to 5 attempts / 20 ms intervals; file lists cap at 4096. A changed revision during snapshot reads fails explicitly. Clipboard is never written/cleared.
+- Images are obtained from the existing clipboard plugin on a blocking worker, encoded as PNG, limited to 12M pixels / 64 MiB encoded bytes, and validated on import. No temporary-attachment retention applies to project imports.
+- External files are COPY-only, including Explorer Cut. Absolute sources and canonical project-relative destinations are validated independently; reject unsafe child names, device/ADS aliases, links/reparse points, non-regular files, excessive nesting, self/ancestor/descendant imports and overlap with any protected batch source. Windows existing target aliases are canonicalized for overlap checks.
+- Stage complete source data beside target before modifying old destination. No-overwrite is default; directory overwrite replaces, not merges. Confirmed overwrite backs up the old item and rolls it back on publication failure. Failed rollback preserves `.cli-manager-import-<uuid>/previous` and returns its path. Windows publication uses MoveFileExW with flags=0 to refuse replacing a concurrently created target. Windows local/WSL/UNC filesystem availability and permissions remain authoritative.
+- No app-data/config/asset protocol scope changes. SSH remains UI/store read-only; no remote upload is implied.
+- Required tests: copied bytes/empty files/Unicode/nested directories, conflict retry, dirty and stale-context guards, screenshot PNG validity, invalid source/target/image, self/ancestor/descendant/batch overlap, case aliases, actual links, staging failure and publication rollback. Desktop clipboard/menu/focus/language checks require a human per frontend quality rules.

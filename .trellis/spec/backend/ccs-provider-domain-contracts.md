@@ -59,6 +59,17 @@ provider command or permit the frontend to open SQLite directly.
 - Every schema step runs in one SQLite transaction: create/verify schema,
   seed settings, record the SHA-384 checksum, set `PRAGMA user_version`, then
   commit. A failed step must leave the previous version and rows intact.
+- Initialization also seeds the built-in Fluxion provider for each app type
+  with the stable IDs `builtin-fluxion-<app_type>` and `INSERT OR IGNORE`, so
+  a rename, reorder, disable, current-selection or key added later survives.
+  Because `open_connection` initializes on every open, the seed is not a
+  first-run-only step: it must consult the `settings` key
+  `builtin_provider_dismissals.v1`
+  (`{"schemaVersion":1,"items":["<app_type>:<provider_id>"]}`) and skip every
+  dismissed identity. Without that list, deleting a built-in provider looks
+  like a no-op and silently resets its name, URL, order and meta (issue #242).
+  An unparsable dismissal row means "nothing dismissed"; it must never block
+  seeding permanently.
 - Before applying any newer schema to an existing non-empty database, the WAL is
   checkpointed and the database is copied to
   `.cli-manager/backups/providers/providers.db.backup-<unix-ms>-<pid>.db`.
@@ -105,6 +116,9 @@ provider command or permit the frontend to open SQLite directly.
   backup, rejects future versions without mutation, and rolls back both backup
   failure and malformed-routing-schema failure before `user_version` changes.
 - Assert version-2 reopen is idempotent.
+- Assert a deleted built-in provider is not reseeded by later initialization,
+  that the dismissal is scoped to one app type, and that a corrupt dismissal
+  row still seeds.
 - Keep the historical v25/v26 migration checksum/registration tests passing.
 
 ### 7. Wrong vs Correct
@@ -159,6 +173,21 @@ legacy cli-manager.db migration unchanged
   documents must retain comments/order. Frontend parsing is only an editor aid.
 - Writers change only documented provider-owned paths. Preserve Hooks,
   permissions, MCP, project trust, statusline and unknown user fields.
+- Codex provider/common runtime materialization excludes root `hooks.state`,
+  `notice`, `tui.status_line`, `tui.model_availability_nux`,
+  `windows_wsl_setup_acknowledged` and `projects.<path>.trust_level`.
+  These are Home-owned state/preferences, not supplier runtime overrides.
+  When regenerating an existing same-name managed profile, preserve its own
+  Codex-saved `hooks.state` and `projects.<exact-path>.trust_level` decisions.
+  Retain trusted/untrusted without normalizing paths, copying other profile/Home
+  decisions, or accepting supplier-provided trust. Invalid saved project trust
+  must fail without replacing the file. Other prior supplier options are not
+  retained; this does not change the lifecycle of new project-extension profiles.
+  Preserve the target Home (including false/empty values), actual Hook
+  definitions, features, other TUI/desktop options, project extension fields,
+  explicit user profiles and all other non-secret runtime options. Raw stored
+  documents are not migrated. Legacy snapshot and managed proxy readers use
+  the same filter; never inject host state into WSL or remote Home.
 - When a writer owns a credential-bearing document, it must remove stale
   provider credentials from every owned profile/entry before projecting the
   selected active key; an unselected Grok model profile or legacy top-level
@@ -446,11 +475,27 @@ corresponding detection or persistence transition.
 
 - `provider_common_config_validate` accepts the same `CommonConfigSetInput` as
   `provider_common_config_set` and returns no document or secret data.
-- It validates app type, expected format, JSON object shape, TOML syntax and
-  managed-secret exclusion without opening a write transaction or changing the
-  `settings` row.
+- It validates app type, expected format, JSON object shape and TOML syntax
+  without opening a write transaction or changing the `settings` row.
 - `provider_common_config_set` calls the same repository validator before its
   database write; validate and save therefore cannot drift in accepted syntax.
+
+## Common configuration is format-validated only (2026-09-01, issue #241)
+
+- Common configuration validation is **format-only**: JSON object shape for
+  Claude, TOML syntax for Codex/Grok Build. There is no secret-field gate, and
+  `provider_common_config_contains_secret` is no longer emitted by any path.
+- Rationale: the gate matched `token`/`key`/`secret`/`password`/`credential`/
+  `authorization` as **substrings of field names**, so ordinary CLI options such
+  as `model_auto_compact_token_limit` and `requires_openai_auth` were rejected as
+  secrets. Substring field-name matching cannot distinguish a credential from an
+  option that merely mentions one.
+- `provider_common_config_get` / `_set` return the stored document **verbatim,
+  never redacted**. The editor is a round-trip surface: masking a value the user
+  just typed would make the next save persist `[REDACTED]`. Redaction stays on
+  the provider document and effective-preview DTOs, which are display-only.
+- Whether a credential belongs in common configuration is the user's decision.
+  The key manager remains the recommended place, not an enforced one.
 
 ## Provider editor and current-state feedback contract (2026-08-04)
 
@@ -473,6 +518,13 @@ corresponding detection or persistence transition.
   and Grok Build use `{ "config": "<TOML>" }` plus any existing envelope fields.
 - Existing JSON secret fields and TOML secret paths remain owned by the key
   manager. A provider document edit may change non-secret fields only.
+- Provider TOML documents share the credential-name classifier used by the
+  global TOML projection, plus protection for nonstandard private keys and
+  credentials. Ordinary options including `model_auto_compact_token_limit`
+  and `api_key_model_discovery` are not secrets even if their names contain
+  `token` or `key`. Read redaction, new-field rejection, and preservation of
+  existing secrets must agree; Claude JSON keeps its separate conservative
+  classifier. Invalid TOML remains conservatively redacted.
 - Current detection scans active-key candidates for a plan whose every target
   live byte sequence equals its desired byte sequence. Exact materialized match
   takes precedence over a stale `is_current` flag; the flag remains a fallback
@@ -1130,24 +1182,159 @@ stop routing + remove takeovers
 - Assert the current eligible provider is promoted ahead of the saved queue
   order for daemon selection.
 
+## Scenario: Automatic failover current-provider identity commit (2026-08-17)
+
+### 1. Scope / Trigger
+
+- Trigger: automatic failover selects a provider and reaches the existing
+  non-streaming or streaming success-commit boundary.
+- Goal: keep `providers.is_current` aligned with the provider that actually
+  completed the routed request, including when the saved queue excludes the
+  previous current provider.
+
+### 2. Signatures
+
+```text
+ProviderSnapshot { provider_id, is_current, ... }
+should_hot_switch_provider(auto_failover_enabled, selected_provider_is_current, status)
+apply_hot_switch_for_active_homes(app_type, next_provider_id)
+```
+
+### 3. Contracts
+
+- Candidate position is an attempt-order property, not provider identity.
+  Queue index `0` may still be a non-current provider when the previous
+  current provider is not eligible or is absent from the queue.
+- A successful automatic request schedules the existing safe hot-switch path
+  whenever the selected request snapshot was not current. An already-current
+  provider does not schedule a redundant switch.
+- Non-streaming requests commit only after the complete successful body is
+  read. Streaming requests commit only after the protocol-specific semantic
+  completion event. Failure, incomplete stream, timeout, or client
+  cancellation must not update `is_current`.
+- `attempt_index`, `attempt_count`, and `degraded` continue to describe the
+  request's candidate traversal. Do not derive provider-current identity from
+  those usage fields.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Automatic failover off | Do not schedule automatic hot switch |
+| Selected snapshot is already current | Keep current provider; no redundant switch |
+| Non-current provider completes successfully | Run the existing hot-switch/commit path |
+| Non-current provider returns failure or its stream does not complete | Keep the previous current provider |
+
+### 5. Good / Base / Bad Cases
+
+- Good: current A is outside queue `[B, C]`; B succeeds at index `0`, becomes
+  current, and is highlighted by all `isCurrent` consumers after refresh.
+- Base: current A is eligible and succeeds at index `0`; no hot switch occurs.
+- Bad: treat `selected_provider_index > 0` as proof of provider change; B at
+  index `0` then serves requests while A remains highlighted.
+
+### 6. Tests Required
+
+- Assert a non-current candidate at index `0` requires a hot switch on success.
+- Assert current candidates, disabled automatic failover, and failed HTTP
+  responses do not require a switch.
+- Preserve streaming tracker tests proving completion succeeds while failure,
+  early EOF, timeout, and cancellation cannot commit the switch.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+should_switch = selected_provider_index > 0
+```
+
+#### Correct
+
+```text
+should_switch = auto_failover_enabled
+  && !selected_provider_is_current
+  && response_is_success
+```
+
 ## Scenario: Persisted routing intent and daemon runtime reconciliation (2026-08-09)
 
 ### 1. Scope / Trigger
 
-- Trigger: the persisted routing service setting is enabled, but the daemon
-  has restarted or is otherwise stopped.
+- Trigger: the GUI connects to or spawns a daemon, or a later routing refresh
+  finds that persisted service intent differs from daemon runtime.
 - Goal: do not present a stopped listener as enabled, and restore the desired
-  listener when the routing page refreshes or the user enables it again.
+  listener without depending on a specific frontend page mounting.
 
-### 2. Contracts
+### 2. Signatures
+
+```text
+reconcile_persisted_service(client) -> RoutingState
+routing_set_service_enabled(enabled) -> RoutingState
+RoutingStart { listener_addresses, preferred_port, last_actual_port }
+```
+
+### 3. Contracts
 
 - `service_enabled` is the persisted desired state; `daemon.status` is the
   runtime truth used by the UI and takeover/failover gating.
+- After `connect_or_spawn` returns a valid client, the Rust startup path must
+  reconcile persisted service intent before publishing that client through
+  `DaemonBridge`. Recovery cannot be owned only by Settings or sidebar Hooks.
+- Enabled intent plus a stopped daemon sends `RoutingStart` with the complete
+  persisted local/WSL listener set, preferred port, and last actual port.
+  Running runtime is an idempotent no-op; disabled intent must not start it.
+- A successful start persists the returned actual port without changing the
+  user's enabled intent. A persistence failure rolls back the runtime action.
+- Recovery failure is logged with a sanitized error code and must not prevent
+  the valid daemon client from being installed in `DaemonBridge`.
 - If persisted service intent is enabled while the daemon is stopped, routing
   state refresh attempts `RoutingStart` and keeps the real stopped state visible
   if recovery fails.
 - Re-enabling an already-persisted service must reconcile the daemon instead of
   returning early.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Intent disabled + runtime stopped | No-op; do not start listener |
+| Intent enabled + runtime running | No-op; preserve listener and actual port |
+| Intent enabled + runtime stopped | Start complete persisted listener set and save actual port |
+| WSL NAT gateway no longer matches takeover | Reject recovery with existing gateway-changed error; keep bridge usable |
+| Runtime action succeeds but persistence fails | Roll back start/stop and return sanitized persistence error |
+| Daemon lacks routing capability | Skip recovery, install bridge, expose unsupported runtime truth |
+
+### 5. Good / Base / Bad Cases
+
+- Good: routing was enabled, a new daemon starts stopped, startup reconciliation
+  restores it before any provider UI is opened.
+- Base: an existing daemon still owns the running listener; reconnect is a no-op.
+- Bad: restore only in `useNativeProviderRouting`, leaving sidebar-only startup
+  with enabled intent and a stopped listener.
+
+### 6. Tests Required
+
+- Assert enabled/stopped chooses Start, enabled/running is a no-op,
+  disabled/running chooses Stop, and disabled/stopped is a no-op.
+- Assert the start frame preserves the complete listener list plus preferred
+  and last actual ports.
+- Run daemon routing tests, full Rust tests, and `cargo check`; manually smoke
+  test enable -> app/daemon exit -> app relaunch without opening Settings.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+daemon connected -> publish bridge -> wait for Settings Hook to restore route
+```
+
+#### Correct
+
+```text
+daemon connected -> reconcile persisted intent -> publish bridge
+```
 
 - Resetting failover circuits also resets the active route provider to the first
   ready provider in the saved queue order when an active takeover exists.
@@ -1204,6 +1391,34 @@ stop routing + remove takeovers
 - Wrong: manual mode stores `[A, B]`, leaving the active route ambiguous.
 - Correct: manual mode stores `[B]` and hot-switches to B; automatic mode stores
   `[A, B]` and lets failover traverse it.
+
+## Scenario: Automatic failover circuit lifecycle (2026-08-19)
+
+### 1. Scope / Trigger
+
+- Trigger: the user enables or disables automatic failover for one app type.
+- Goal: prevent a circuit state from leaking across failover toggle cycles or
+  appearing while the app is in manual hot-switch mode.
+
+### 2. Contracts
+
+- A successful automatic-failover toggle resets every daemon circuit entry for
+  that app type before the new mode is used; other app types are unchanged.
+- When automatic failover is disabled, provider surfaces derive availability
+  from provider readiness and do not render cached `open` or `halfOpen` circuit
+  labels from daemon snapshots.
+- Re-enabling automatic failover starts from closed circuit counters; later
+  real upstream failures may establish new circuit state normally.
+- The reset is runtime-only. It does not change provider order, the saved
+  queue, the current provider, or circuit policy parameters.
+
+### 3. Tests Required
+
+- Assert the app-wide reset uses an empty provider ID and clears all provider
+  counters for the selected app type.
+- Verify both provider surfaces hide open/half-open labels while automatic
+  failover is disabled and expose newly established state after re-enabling.
+- Verify toggling one app type does not reset another app type's circuits.
 
 ## Scenario: WSL distribution enumeration with deferred Home detection (2026-08-11)
 
@@ -1270,4 +1485,96 @@ environment select change -> provider_home_get -> wsl.exe probe $HOME
 ```text
 environment select change -> provider_wsl_list_distros (enumeration only)
 explicit refresh/save/reset -> provider_home_get/select/reset -> inspect
+```
+
+## Scenario: Provider lifecycle references and project scope gates (2026-08-17)
+
+### 1. Scope / Trigger
+
+- Trigger: disabling/deleting a provider, or selecting a provider from a
+  project/Worktree menu.
+- Goal: distinguish catalog import provenance from real runtime references,
+  keep scoped selection out of the global Home writer, and prevent new Grok
+  project/Worktree overrides.
+
+### 2. Signatures
+
+```text
+delete_provider(appType, providerId) -> Result<(), ProviderError>
+set_provider_enabled(appType, providerId, enabled) -> Result<ProviderCard, ProviderError>
+provider_reference_count(appType, providerId) -> i64
+ProviderSwitchModal.applyProvider(provider) -> persist target provider_overrides
+```
+
+### 3. Contracts
+
+- `provider_reference_count` reads `cli-manager.db` read-only and parses
+  `projects.provider_overrides` plus only `worktrees` whose status is `active`.
+  It uses the same schema-v2 parser as scope resolution: matching app type,
+  `source = cli-manager`, version 2, and exact provider ID.
+- `providers.db.provider_import_refs` records import provenance only. It must
+  never block lifecycle operations; its existing foreign-key cascade remains
+  responsible for cleanup after a provider deletion.
+- Deleting a built-in provider (`builtin-fluxion-<app_type>`) writes its
+  dismissal token in the same transaction as the `DELETE`. A failed dismissal
+  rolls the deletion back rather than leaving a row the initializer reseeds.
+  User-created providers write no dismissal.
+- A missing app database returns zero references. Lifecycle scanning counts
+  only successfully parsed schema-v2 values. Malformed or legacy CCS
+  overrides do not resolve to a native catalog ID and therefore cannot block
+  every provider operation; scope resolution keeps its separate migration
+  diagnostics when it is asked to launch such a scope.
+- Claude/Codex selector mutations persist only the selected project or
+  Worktree override. `provider_scope_prepare` remains the launch materializer:
+  Claude uses generated settings plus `--settings`; Codex uses a non-secret
+  profile beside the real Home plus `--profile`, with the key in child process
+  environment only.
+- New Grok project/Worktree selection is unsupported. UI must not list,
+  persist, or globally apply Grok from that menu. Existing persisted Grok
+  references remain readable solely for backward compatibility.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Exact project or active Worktree reference | `provider_referenced_cannot_disable` / `provider_referenced_cannot_delete` |
+| Imported but unreferenced non-current provider | lifecycle operation proceeds |
+| Current provider | existing `provider_current_cannot_*` error |
+| Malformed or legacy CCS override during lifecycle scan | ignored; it is not a native catalog reference |
+| Grok project/Worktree switch | localized unsupported UI; no mutation |
+
+### 5. Good / Base / Bad Cases
+
+- Good: an imported, non-current Claude provider with no v2 override can be
+  disabled or deleted.
+- Base: a project and an active Worktree reference the same Claude provider;
+  both block disable/delete, while a missing Worktree does not.
+- Bad: count `provider_import_refs`, invoke global preview/apply from a
+  project selector, or create a new Grok override from the UI.
+
+### 6. Tests Required
+
+- Repository regression test covers project reference, app-type isolation,
+  active versus missing Worktree, a non-matching provider ID, and legacy or
+  malformed values that must not block catalog operations.
+- Scope tests keep schema-v2 parser and Claude/Codex launch materialization
+  coverage passing.
+- Frontend type-check verifies delete-error localization and the Grok gate.
+- Manual desktop checks cover project and Worktree selection for Claude/Codex,
+  global Home non-mutation, and the Grok unsupported prompt in both locales.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+delete -> providers.db.provider_import_refs -> block imported provider
+project switch -> provider_global_apply -> rewrite real Home
+```
+
+#### Correct
+
+```text
+delete -> cli-manager.db v2 project/active-Worktree references -> exact block
+project switch -> target provider_overrides -> next launch materializes scope
 ```

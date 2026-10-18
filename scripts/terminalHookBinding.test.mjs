@@ -9,7 +9,7 @@ import ts from "typescript";
 const tempDir = mkdtempSync(join(tmpdir(), "cli-manager-hook-binding-"));
 process.on("exit", () => rmSync(tempDir, { recursive: true, force: true }));
 
-const source = readFileSync(new URL("../src/stores/terminalHookBinding.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../src/features/terminal/store/terminalHookBinding.ts", import.meta.url), "utf8");
 const output = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText;
@@ -37,9 +37,46 @@ test("精确 tabId 始终优先", () => {
   assert.deepEqual(result, { tabId: "tab-b", reason: "exact" });
 });
 
+test("三个终端中的第三个 Codex Hook 不受首个终端完成状态或 legacy 主映射影响", () => {
+  for (const path of ["D:/work/project", "D:/work/another-project"]) {
+    const result = resolveCliHookTarget({
+      rawTabId: "third", primaryTabId: "first", source: "codex",
+      cwd: path, sessionId: "codex-third", receivedAt: 10_000,
+      candidates: [
+        candidate("first", { source: "codex", cliSessionId: "codex-first", outputActivityAt: 1_000 }),
+        candidate("second", { source: null }),
+        candidate("third", { source: "codex", paths: [path], cliSessionId: "codex-third", outputActivityAt: 9_900 }),
+      ],
+    });
+    // 运行状态更新与通知点击共用此返回值；不得折叠到首个终端。
+    assert.deepEqual(result, { tabId: "third", reason: "exact" });
+  }
+});
+
 test("OpenCode 启动命令映射到独立 Hook 来源", () => {
   assert.equal(inferHookBindingSource("opencode --model test"), "opencode");
   assert.equal(inferHookBindingSource("OpenCode.exe"), "opencode");
+});
+
+test("Kimi Code 裸命令与 Windows shim 映射到独立 Hook 来源", () => {
+  assert.equal(inferHookBindingSource("kimi --continue"), "kimi");
+  assert.equal(inferHookBindingSource('"C:\\Program Files\\Kimi\\kimi.cmd" --model moonshot'), "kimi");
+  assert.equal(inferHookBindingSource("kimi.ps1"), "kimi");
+});
+
+test("同路径多个 Kimi 会话保持歧义拒绝", () => {
+  const result = resolveCliHookTarget({
+    rawTabId: "external:kimi:session",
+    primaryTabId: "external:kimi:session",
+    source: "kimi",
+    cwd: "D:/work/project",
+    receivedAt: 10_000,
+    candidates: [
+      candidate("kimi-a", { source: "kimi" }),
+      candidate("kimi-b", { source: "kimi" }),
+    ],
+  });
+  assert.deepEqual(result, { tabId: null, reason: "ambiguous" });
 });
 
 test("外部 Hook 仅有一个路径候选时自动恢复", () => {

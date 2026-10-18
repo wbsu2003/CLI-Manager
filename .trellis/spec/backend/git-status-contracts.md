@@ -50,6 +50,26 @@
 - Rust 单测覆盖英文和中文非 Git 错误识别，并拒绝把所有权错误误分类。
 - `node --test scripts/fileExplorerWslGitRefresh.test.mjs` 覆盖负缓存、手动重试、结果归属和超时执行器接入。
 
+### 非 Git 目录必须返回稳定错误码并渲染友好空态
+
+**Context**：用户经常把普通目录当项目打开。native/libgit2 链路曾把 libgit2 原始错误拼成 `不是 Git 仓库或无法访问: could not find repository at '...'; class=Repository (6); code=NotFound (-3)` 返回，前端只能把它当提示语铺进 Git 面板；同时文件浏览器的非 Git 负缓存依赖 `not_git_repository`，在 Windows 本地项目上完全命不中，每次刷新都重复查询。
+
+**Contract**：
+
+- `git_get_changes` 的三条链路（native/libgit2、WSL `wsl.exe git`、SSH Agent）识别「目录不是 Git 仓库」时都必须返回稳定错误码 `not_git_repository`（常量 `commands::git::NOT_GIT_REPOSITORY_CODE`）。
+- libgit2 侧只按 `git2::ErrorCode::NotFound` 判定（`format_open_repo_error`）。`Owner`、权限不足、仓库损坏等错误必须保留原始描述并以 `Git 仓库无法访问: <原文>` 上报，禁止归入该码，否则真实故障会被伪装成友好空态。
+- 错误分类统一走 `commands::git::is_not_git_repository_error`（稳定错误码 + shell-out Git 的中英文原生文案），新增链路不得各写一份字符串匹配。
+- 前端 `GitChangesPanel` 命中该场景渲染 `PanelEmptyState` 友好空态（`git.empty.notRepoTitle` / `git.empty.notRepoHint`），其余错误继续走 `formatGitNetError` + `EmptyHint`；`formatGitNetError` 对该场景返回 `git.error.notRepo`，不再把原始错误串塞进 `git.error.generic`。
+- SSH Agent 的映射需要远端 Agent 更新后才生效。旧 Agent 仍返回 `git_failed`，前端按通用错误提示降级；任何链路都不得把非仓库目录当成「成功返回空变更列表」，否则面板会伪装成干净仓库并允许后续写操作。
+
+**Tests**：
+
+- `commands::git::tests::maps_libgit2_not_found_to_stable_non_repository_code`（NotFound 命中、Owner 错误不误判）
+- `commands::git::tests::native_git_changes_reports_stable_code_for_plain_directory`
+- `commands::git::tests::native_git_changes_succeeds_inside_repository`
+- ssh-agent `git::tests::non_git_repository_stderr_maps_to_stable_code`（含 `no_remote` 不被抢走）
+- `npx tsc --noEmit`；手动在非 Git 目录打开 Git 面板，确认显示友好空态而不是原始错误。
+
 ### Common Mistake: 只改 `collect_git_changes_from_repo` 导致面板无效果
 
 **Symptom**：修复/过滤逻辑单测全绿，但 Git 面板 UI 行为不变。
@@ -150,7 +170,7 @@ build_diff_payload(content, can_revert_hunks)
 ### 1. Scope / Trigger
 
 - Trigger: Git 变更面板新增分支列表、Fetch、checkout、本地新建分支能力，跨越 Tauri command、Rust Git 执行、Zustand store、React UI 和 i18n。
-- Target: `src-tauri/src/commands/git.rs` 中 Git 面板相关命令；前端只通过 Tauri command 调用，不拼接 shell 命令。
+- Target: `src-tauri/src/features/git/mod.rs` 中 Git 面板相关命令；前端只通过 Tauri command 调用，不拼接 shell 命令。
 
 ### 2. Signatures
 
@@ -244,7 +264,7 @@ await invoke("git_checkout_branch", {
 ### 1. Scope / Trigger
 
 - Trigger: Git 分支切换遇到 `checkout_conflict` 时，前端提供用户确认后的 Smart Checkout。该流程会移动未提交改动，必须由后端按固定序列执行。
-- Target: `src-tauri/src/commands/git.rs` 中 `git_smart_checkout_branch`；前端只能在用户确认后调用。
+- Target: `src-tauri/src/features/git/mod.rs` 中 `git_smart_checkout_branch`；前端只能在用户确认后调用。
 
 ### 2. Signatures
 
@@ -325,7 +345,7 @@ try {
 ### 1. Scope / Trigger
 
 - Trigger: Git 变更面板允许从右键菜单物理删除未跟踪文件。
-- Target: `src-tauri/src/commands/git.rs` 的 `git_delete_untracked_paths`；前端只能通过 Tauri command 调用，不拼接 shell 命令。
+- Target: `src-tauri/src/features/git/mod.rs` 的 `git_delete_untracked_paths`；前端只能通过 Tauri command 调用，不拼接 shell 命令。
 
 ### 2. Signatures
 
@@ -549,3 +569,37 @@ await releaseSshRemoteGitContext(context);
 // Correct: 组件只释放 lease，由 registry 决定是否关闭最后一个 consumer。
 await lease.release();
 ```
+
+---
+
+## Git 提交历史只读合约
+
+### 1. Scope / Trigger
+
+- Git 面板“历史”视图通过 Local/WSL/SSH Transport 浏览提交、详情和提交文件 Diff 时适用。
+
+### 2. Contracts
+
+- 提交列表固定每页 50 条，cursor 是最后一条已返回提交的完整 OID；搜索覆盖标题、作者名称/邮箱和 OID。
+- Local 使用 libgit2 Revwalk/tree diff；WSL 与 SSH 使用固定参数数组和有界批次扫描，禁止把搜索、OID 或路径拼入 shell 字符串。
+- 列表只返回元数据，详情和文件 Diff 按需请求。Merge 提交只与第一父提交比较，根提交与空树比较。
+- 历史 Diff 的 `canRevertHunks` 始终为 false，UI 与 Controller 均不得暴露 stage/discard/revert/cherry-pick/reset。
+- SSH 请求 `gitListCommits`、`gitCommitDetail`、`gitCommitFileDiff` 必须先协商 `gitHistory` capability；旧 Agent 在写 frame 前返回 `ssh_agent_capability_missing:gitHistory`。
+- SSH 根仓库的空字符串 repository id 是合法值；只有 null 表示缺少仓库上下文。
+- 项目、仓库、分支、transport 或搜索变化时重置分页与详情，请求返回时必须校验 generation，迟到结果不得覆盖新上下文。
+- 独立 Git 工作区只能在展示层把 50 条 cursor 页连续追加，不得改变 Transport 分页协议；跨页拓扑必须按全部已加载提交重新计算，保证既有行布局确定且不丢失 continuation。
+- 搜索结果不是完整拓扑。父提交不在搜索结果中时只显示中断标记，不得把当前提交直接连接到下一个可见但无父子关系的提交。
+- 工作区的“变更”页复用现有 Git 变更面板和 Transport Lease；历史文件仍复用共享只读 Diff Viewer，不得创建第二套 Diff 实现或写操作入口。
+
+### 3. Edge Cases
+
+- 空/未出生分支返回空页；Detached HEAD 从当前 HEAD 遍历；浅克隆只展示本地可达历史。
+- Worktree 和嵌套仓库沿用当前有效 repository id；WSL `/mnt/<drive>` 映射继续回退 native Git。
+- 重命名保留 oldPath；二进制文件允许出现在详情中，但 Diff 继续走现有大小限制和只读降级。
+- 重命名文件打开 Diff 时必须同时传递新旧相对路径，使 native、WSL 与 SSH 都能保留 rename 元数据；两个路径均需独立校验。
+
+### 4. Tests Required
+
+- Desktop Rust：OID 校验、结构化 WSL 解析、搜索、空仓库、分页 cursor、第一父提交详情、重命名/二进制和 Diff 上限。
+- SSH Agent：history dispatch、root/repository/path confinement、capability 广告；Desktop bridge 验证旧 Agent 在发送前被拒绝。
+- Frontend：TypeScript、分页/搜索状态、上下文 generation 隔离和只读 Diff mutation 断言。

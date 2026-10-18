@@ -1,71 +1,51 @@
 # Hook Guidelines
 
-> How hooks are used in this project.
+## Hooks Must Precede Visibility Guards
 
----
-
-## Overview
-
-<!--
-Document your project's hook conventions here.
-
-Questions to answer:
-- What custom hooks do you have?
-- How do you handle data fetching?
-- What are the naming conventions?
-- How do you share stateful logic?
--->
-
-(To be filled by the team)
-
----
-
-## Custom Hook Patterns
-
-<!-- How to create and structure custom hooks -->
-
-(To be filled by the team)
-
----
-
-## Data Fetching
-
-<!-- How data fetching is handled (React Query, SWR, etc.) -->
-
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- Hook naming rules (use*, etc.) -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-### Common Mistake: Returning before all hooks in visibility-gated panels
-
-**Symptom**: Switching a panel from visible to hidden throws `Rendered fewer hooks than expected` and can blank the React view.
-
-**Cause**: A component calls a hook after an early return such as `if (!open || !visible) return null;`. When the same mounted component later becomes hidden, React sees fewer hooks than the previous render.
-
-**Fix**: Keep every hook call before any render guard. It is fine to compute cheap derived values before returning `null`.
+Components that stay mounted while hidden must call every hook before an early render return.
+Changing visibility must not change hook order or hook count.
 
 ```tsx
-// Wrong
+// Wrong: hiding the panel skips a later hook.
 const value = useMemo(() => buildValue(input), [input]);
 if (!visible) return null;
 const other = useMemo(() => buildOther(value), [value]);
 
-// Correct
+// Correct: hooks run before the render guard.
 const value = useMemo(() => buildValue(input), [input]);
 const other = useMemo(() => buildOther(value), [value]);
 if (!visible) return null;
 ```
 
-**Prevention**: In tabbed or side-panel UIs where hidden tabs stay mounted, scan for any `return null` before later `use*` calls before changing visibility behavior.
+Before changing tab or side-panel visibility, check for `return null` before later `use*` calls.
 
-(To be filled by the team)
+## Settings Escape Ownership and Shell Focus
+
+`SettingsModal` must ignore repeated/composing/default-prevented Escape events. Holding Escape
+after a child closes must not dismiss settings; require a new independent keydown. Before closing, its
+document bubble listener checks both the event's composed path and currently visible
+`dialog`/`alertdialog` layers. A child layer may close synchronously during window capture;
+its presence in the event path still owns that Escape, even after DOM removal.
+
+Mantine `keepMounted` drawers retain `role="dialog"` while hidden. DOM presence alone must
+not block settings dismissal: use layout rectangles plus computed visibility to exclude
+hidden layers (including `display:none` ancestors). An exiting/transparent transition
+still owns Escape until it leaves layout. Preserve child-control `preventDefault()`.
+
+`#main-content` and `.ui-workspace-settings-dialog` retain programmatic focus for skip links
+and focus traps but suppress their own native outline. Never disable focus outlines on all
+elements or remove the shells' negative tabIndex: interactive children still need keyboard
+focus cues. Chromium switches a clicked shell to focus-visible when Escape is pressed.
+
+Run `node --test scripts/settingsEscape.browser.test.mjs` (existing Playwright runtime and
+Edge, or `SETTINGS_TEST_PLAYWRIGHT` / `SETTINGS_TEST_BROWSER` overrides). Cover hidden
+drawers, visible and zero-duration child closes, alert dialogs, default prevention, IME, repeat,
+button Tab focus, and both language/theme variants. The fixture isolates remote services;
+native Tauri behavior remains a manual verification item.
+
+The MCP editor disables Mantine's window-capture Escape handler and handles local bubbling
+after controls. Combobox closes its menu without default prevention; check its target's
+`data-mantine-stop-propagation` marker before closing the editor. Confirmation suspends the
+editor focus trap; its own Escape cancels only the confirmation. Tests must wait for actual
+focus return before sending the next independent Escape, rather than dispatching it from
+an exiting hidden input.

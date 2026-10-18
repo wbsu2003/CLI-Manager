@@ -3,19 +3,27 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const detailSource = readFileSync(
-  new URL("../src/components/history/SessionDetailPane.tsx", import.meta.url),
+  new URL("../src/features/history/components/SessionDetailPane.tsx", import.meta.url),
   "utf8",
 );
 const workspaceSource = readFileSync(
-  new URL("../src/components/HistoryWorkspace.tsx", import.meta.url),
+  new URL("../src/features/history/api/HistoryWorkspace.tsx", import.meta.url),
   "utf8",
 );
 const listSource = readFileSync(
-  new URL("../src/components/history/HistoryListPane.tsx", import.meta.url),
+  new URL("../src/features/history/components/HistoryListPane.tsx", import.meta.url),
   "utf8",
 );
 const storeSource = readFileSync(
-  new URL("../src/stores/historyStore.ts", import.meta.url),
+  new URL("../src/features/history/store/historyStore.ts", import.meta.url),
+  "utf8",
+);
+const normalizationSource = readFileSync(
+  new URL("../src/features/history/lib/historyNormalization.ts", import.meta.url),
+  "utf8",
+);
+const conversationSource = readFileSync(
+  new URL("../src/features/history/lib/historyConversation.ts", import.meta.url),
   "utf8",
 );
 
@@ -24,19 +32,20 @@ test("conversation is the default view and transcript remains independent", () =
   assert.match(workspaceSource, /setDetailView\("conversation"\)/);
   assert.match(detailSource, /id: "conversation", labelKey: "history\.detail\.view\.conversation"/);
   assert.match(detailSource, /id: "transcript", labelKey: "history\.detail\.view\.transcript"/);
-  assert.match(detailSource, /detailView === "transcript" && visibleMessages\.length > 0/);
+  assert.match(detailSource, /detailView === "transcript" && visibleMessageEntries\.length > 0/);
   assert.match(detailSource, /data-index=\{virtualIndex\}/);
   assert.match(detailSource, /virtualIndex=\{virtualRow\.index\}/);
+  assert.match(detailSource, /<HistoryMessageCard[\s\S]*?index=\{messageIndex\}[\s\S]*?virtualIndex=\{virtualRow\.index\}/);
 });
 
 test("conversation keeps only visible user and assistant text", () => {
-  assert.match(detailSource, /message\.parts\?\.length \? message\.parts : fallbackMessageParts\(message\)/);
-  assert.match(detailSource, /role === "user" \|\| role === "assistant"/);
-  assert.match(detailSource, /if \(role !== "user" && role !== "assistant"\) return false;/);
+  assert.match(detailSource, /effectiveHistoryMessageParts\(message\)/);
+  assert.match(conversationSource, /role === "user" \|\| role === "assistant"/);
+  assert.match(conversationSource, /if \(role !== "user" && role !== "assistant"\) return false;/);
   assert.match(detailSource, /if \(textParts\.length === 0\) return;/);
   assert.match(detailSource, /isConversationVisibleMessage/);
-  assert.match(detailSource, /firstLine\.startsWith\("base directory for this skill:"\)/);
-  assert.match(storeSource, /parts: parts\.length > 0 \? parts : undefined/);
+  assert.match(conversationSource, /firstLine\.startsWith\("base directory for this skill:"\)/);
+  assert.match(normalizationSource, /parts: parts\.length > 0 \? parts : undefined/);
 });
 
 test("search and cross-view jumps keep the conversation view targetable", () => {
@@ -61,7 +70,7 @@ test("session detail keeps the last-request-wins guard", () => {
   assert.match(openSessionSource, /const requestSeq = \+\+sessionDetailRequestSeq/);
   assert.match(
     openSessionSource,
-    /if \(requestSeq === sessionDetailRequestSeq\) set\(\{ activeSession: detail \}\)/,
+    /if \(requestSeq === sessionDetailRequestSeq\) \{\s*set\(\{ activeSession: detail \}\);/,
   );
   assert.match(
     openSessionSource,

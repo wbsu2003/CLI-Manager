@@ -7,9 +7,9 @@
 ## Current Status
 
 <!-- @@@auto:current-status -->
-- **Active File**: `journal-2.md`
-- **Total Sessions**: 87
-- **Last Active**: 2026-08-13
+- **Active File**: `journal-3.md`
+- **Total Sessions**: 136
+- **Last Active**: 2026-10-16
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,8 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~964 | Active |
+| `journal-3.md` | ~181 | Active |
+| `journal-2.md` | ~1975 | Archived |
 | `journal-1.md` | ~2014 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +31,55 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 136 | 2026-10-16 | 终端字素宽度与 Pi 滚动条验证（#285/#286） | `b77fc5e7` | `master` |
+| 135 | 2026-10-16 | PR #284 多行启动命令 P2 修复 | `900deab0` | `pr-284-review-fixes` |
+| 134 | 2026-10-16 | Pi Hook 运行结束边界修复验收与提交 | `3d323958` | `master` |
+| 133 | 2026-10-13 | 终端布局锁定与验收修正（#278） | `8d500f01` | `master` |
+| 132 | 2026-10-12 | 修复 Esc 焦点边框与远程连接设置退出 | 同本提交 | `master` |
+| 131 | 2026-10-09 | 修复 Codex Hook 串终端与实时统计 | `d1c0689e` | `master` |
+| 130 | 2026-10-08 | V1.4.2 历史删除补齐与编译告警清理 | `14e9de2e`, `70ea97ea` | `master` |
+| 129 | 2026-10-08 | Codex Shift 方向键修复与项目菜单图标 | `b7eb8008`, `1f7b5020` | `master` |
+| 128 | 2026-10-08 | PR 276 Skills 扫描修复与性能验证 | `0eed48b0`, `f78bb83d` | `pr-276-review-fixes` |
+| 127 | 2026-10-08 | V1.4.2 ZCode CLI 类别与选项排序 | `d7805d7d495b50fda577a3b1a2fe9d2775208186` | `pr-273-local` |
+| 126 | 2026-10-07 | Worktree 合并优化交付与清理 | `2f4175ab` | `master` |
+| 125 | 2026-09-20 | 终端字体回退与外部程序选择 | `77eb48be` | `master` |
+| 124 | 2026-09-14 | 终端 Markdown 预览加载与滚动导航 | `ca2151a8`, `0cc91a0a` | `master` |
+| 123 | 2026-09-14 | 完成 MCP 与 Skills 管理 UI 优化 | `9b933639` | `mcp-skill-manager` |
+| 122 | 2026-09-14 | 完成 MCP 与 Skills 管理 | `f71f4974` | `mcp-skill-manager` |
+| 121 | 2026-09-11 | Fix global MCP and Skills provider Home reuse | `38b2c468` | `mcp-skill-manager` |
+| 120 | 2026-09-11 | 完成 V1.4.0 MCP 与 Skills 管理主线 | `58fe4b05`, `d9e04ace`, `e606b4f3`, `1b421ec4` | `mcp-skill-manager` |
+| 119 | 2026-09-13 | 修复 PR #259 文件浏览器审查问题 | `160bb416` | `fix/pr-259-review-findings` |
+| 118 | 2026-09-11 | Codex 供应商模型编辑与生效预览修复 | `b63acd59` | `master` |
+| 117 | 2026-09-10 | 修复 Pi CLI 全屏 TUI 底部输入框 | `09341b65` | `master` |
+| 116 | 2026-09-10 | 修复大型仓库 Git 面板卡顿 #257 | `ae116d6b` | `master` |
+| 115 | 2026-09-09 | 完成项目置顶快捷入口 | `0b2ccabe` | `master` |
+| 114 | 2026-09-09 | Worktree 强制合并按钮 | `7ad2134a` | `master` |
+| 113 | 2026-09-09 | Codex Goal Hook 状态与通知修复 | `3bf53d31` | `master` |
+| 112 | 2026-09-09 | Git 双组件布局验收与提交 | `dc039078` | `master` |
+| 111 | 2026-09-07 | 修复文件浏览器右键菜单裁剪 | `c1163a2d` | `master` |
+| 110 | 2026-09-07 | 修复 Markdown 文件链接与锚点导航 | `3680fa64` | `master` |
+| 109 | 2026-09-07 | 完成 Issue #248 VS Code 式工作区布局控制 | `1a780b2e` | `master` |
+| 108 | 2026-09-04 | 修复历史会话 Markdown 表格渲染 | `25defb59` | `master` |
+| 107 | 2026-09-04 | history-content-sort-codex-title | `dc3e2ddc` | `master` |
+| 106 | 2026-09-04 | 解除 AI 进展时间轴展开收起限制 | `eb1f2ee5` | `master` |
+| 105 | 2026-09-03 | Hook 系统通知自定义声音 | `dace561f` | `master` |
+| 104 | 2026-09-03 | Fix Codex CLI output recovery | `c51a0bcf` | `master` |
+| 103 | 2026-09-01 | SSH Agent SFTP 发布与远程目录选择器 | `4601e769` | `master` |
+| 102 | 2026-08-31 | 终端滚动快捷键 | `7ce0c105` | `master` |
+| 101 | 2026-08-31 | 终端滚动到底部快捷跳转按钮 | `37cc08a3` | `master` |
+| 100 | 2026-08-31 | 修复 Grok Build Alt+Enter 换行并合并 PR #240 | `f6b8ca66`, `66ba0fba` | `master` |
+| 99 | 2026-08-31 | 修复 Grok Build Alt+Enter 换行 | `f175f706` | `master` |
+| 98 | 2026-08-26 | 修复 macOS Fcitx5 终端中文重复输入 | `b669c1db` | `master` |
+| 97 | 2026-08-26 | History smart-title prompt and responsiveness | `65a6b5cf` | `master` |
+| 96 | 2026-08-24 | Fix file preview refresh and file tab menu | `9c6aa22d` | `master` |
+| 95 | 2026-08-21 | 修复 PR #224 Grok Hook 配置恢复 | `dde0f550`, `84326c38`, `e4c62bc2` | `agent/grok-ssh-hooks-history` |
+| 94 | 2026-08-21 | Fix provider dialog layering and terminal file navigation | `575f903e` | `master` |
+| 93 | 2026-08-20 | Review and harden PR 220 Kimi history | `c52a9b7f` | `pr220` |
+| 92 | 2026-08-19 | 修复 Kimi Hook 本地检测延迟 | `890f59d4` | `master` |
+| 91 | 2026-08-19 | Fix PR #219 Kimi cross-platform tests | `a9781941`, `2152a22d` | `agent/kimi-code-cli-hooks` |
+| 90 | 2026-08-18 | 历史会话对话消息操作栏 | `9f8602bb` | `master` |
+| 89 | 2026-08-18 | 修复 SSH Grok 会话历史打开提示 | `60372d68` | `master` |
+| 88 | 2026-08-17 | 修复供应商作用域与 Pi 终端诊断 | `3207bc68` | `master` |
 | 87 | 2026-08-13 | 修复 Diff 回退确认与折叠项目交互 | `47661dcc` | `master` |
 | 86 | 2026-08-07 | 修复 Grok 会话历史路径并提交任务 | `0fc7f495` | `feat/native-provider-management` |
 | 85 | 2026-08-06 | 修复 Grok Home 隔离并恢复旧会话 | `f38bd412`, `f4ae4c5e` | `feat/native-provider-management` |

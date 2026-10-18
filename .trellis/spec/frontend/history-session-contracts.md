@@ -1,5 +1,72 @@
 # History Session Contracts
 
+## Scenario: Source-aware session deletion (V1.4.2)
+
+### 1. Scope / Trigger
+
+- Trigger: changing list deletion controls, bulk selection/confirmation, source capabilities, or Store cleanup after source deletion.
+- Goal: displayed eligibility, backend scope, and removed application rows must describe the same operation.
+
+### 2. Signatures
+
+- Shared policy: `src/features/history/lib/historyDeletion.ts`.
+- `getHistoryDeletionBlockReason(session)` returns a stable rejection code or `null`; `assertHistorySessionDeletable` also rejects missing rows.
+- `planHistoryDeletion(selected)` returns `{ sessionKeys, blockedReason }`.
+- `executeHistoryDeletion(keys, getSessions, deleteSession)` returns `{ deletedCount, error }` after whole-batch preflight and sequential execution. Store deletion returns actual covered keys; only these may skip a later selected operation.
+- Production confirmations call Store `deleteSessions(keys)`, which synchronously acquires the non-persistent `deletingSessions` flag before its first await and releases it in `finally`. `null` means another queue owns execution; this call performed no deletion and must not show a success/error notification.
+- `historyDeletedSessionKeys(target, sessions, deletedPaths?)` identifies the application rows actually removed by the source operation. Codex success returns canonical deleted paths from IPC; other sources retain null.
+
+### 3. Contracts
+
+- Each of the twelve existing sources explicitly declares supported deletion in `historySources.ts`, matching the backend `history_sources_list_descriptors` registry in `features/history/sources.rs`. Shared reader templates must not automatically grant future readers write permission. Do not change editing/conversion capabilities with deletion support.
+- List controls, single/bulk request handlers, confirmation execution, and Store use the same policy. SSH or `read_only` rejects before snapshot handling; a local favorite snapshot only deletes saved application data and never invokes source deletion.
+- Preserve path-based Claude and other-source independent-subagent restrictions. V1.4.3 local Codex ordinary rollout children/forks are independently deletable, irrespective of parent visibility/existence. A batch may merge a selected child only when the actual source deletion covers its file. Any ineligible selected row blocks the entire batch.
+- Recheck every queued key against current Store state before starting a batch. During execution Store checks again; missing rows are errors, not successful no-ops. Real I/O failures stop the queue and report only completed calls.
+- Pi/Gemini/Copilot/Antigravity/Kiro/Cursor/Cline, Kimi/Grok, OpenCode, and snapshots remove only their selected application row. Claude clears actual adjacent `subagents/agent-*.jsonl` rows with matching source/project. Codex clears only returned physical paths across date/project directories, excluding remote/read-only/snapshot rows. Parent metadata alone never proves a file was deleted.
+- File comparisons normalize Windows prefixes and WSL host/distro aliases, preserving Linux path case. Other roots/projects, remote rows, and independent snapshot rows must survive cleanup.
+- Invoke `history_delete_session` before deleting `session_meta`, generated titles, and favorite snapshots; source failure leaves these and list/detail/search state unchanged. Keep existing star/edit-audit retention.
+- Confirmation copy distinguishes original records from saved snapshots. Disabled reasons and known mutation errors resolve through the history zh-CN/en-US dictionaries; other I/O diagnostics remain available.
+- Single/bulk request and confirmation callbacks synchronously read current Store execution state; rendered `disabled` alone does not prevent same-turn reentry. Lock ownership outlives HistoryWorkspace remounts. List row/bulk/context-menu deletion consume that state. The history confirmation passes optional `ConfirmDialog.pending`; while pending, actions and Escape/outside dismissal are disabled, and the original queue alone emits the final result. Other dialog callers default to existing behavior. Do not convert genuine missing-session errors into success to mask concurrent execution.
+
+### 4. Validation & Error Matrix
+
+| Input/state | Required result |
+|---|---|
+| Supported local ordinary session | Confirm and invoke source deletion |
+| Future/unsupported reader | Disabled control and Store rejection |
+| SSH/read-only, including a read-only snapshot | No source or metadata deletion |
+| Local saved snapshot | Application cleanup without source IPC |
+| Selected covered Claude/Codex parent and child | One parent operation; clean actual covered rows |
+| Local Codex rollout child/fork with metadata parent | Permit confirmed deletion; cleanup only actual returned files |
+| Other-source child with only metadata parent or a file-only parent | Reject separate deletion; do not claim it was removed with the parent |
+| A queued row vanishes/becomes read-only before confirmation | Preflight fails before any operation |
+| Second operation fails after one success | Stop; report `1/total` and retain failed/unattempted rows |
+| Repeated confirm/Enter, single versus bulk, or remounted confirmation while deleting | One Store-owned queue; duplicate call returns null without notification; finally releases lock |
+| Pending deletion dialog receives cancel/Escape/outside interaction | No fake cancellation; keep waiting for the unique queue's final result |
+
+### 5. Good / Base / Bad Cases
+
+- Good: Pi deletion removes the selected row and its metadata; a related transcript still on disk remains visible.
+- Base: existing Claude/Codex file-tree deletions clean their actual adjacent child rows.
+- Bad: remove every row with `parent_session_id` after a file-only deletion; refresh then makes the undeleted rows reappear.
+
+### 6. Tests Required
+
+- `scripts/historyDeletion.test.mjs` executes shared policy and the real Store action with mocked IPC/database boundaries: all source capabilities, snapshots/read-only, batch preflight/partial failure, file-scope cleanup, WSL comparison, bilingual errors, success cleanup and failure preservation.
+- `scripts/historyDeletionConcurrency.test.mjs` executes the real Store coordinator, Workspace callbacks and shared dialog JSX in memory: original duplicate-confirm repro, same-turn and remounted calls, partial failure/retry, real missing rows, pending dismissal/default compatibility and production wiring.
+- Run relevant history regression scripts, `npx tsc --noEmit`, and standalone `npm run check:architecture -- --strict`.
+- Human desktop validation: delete test sessions for all seven sources and refresh, check mixed-source batches and subagents, switch zh-CN/en-US, retain 24-hour time. AI must not start CLI-Manager/Tauri for UI verification.
+
+### 7. Wrong vs Correct
+
+```ts
+// Wrong: a source failure halfway through an unchecked selection is avoidable.
+for (const key of selectedKeys) await deleteSession(key);
+
+// Correct: use the confirmed plan and recheck the entire queue before mutations.
+await executeHistoryDeletion(plan.sessionKeys, () => useHistoryStore.getState().sessions, deleteSession);
+```
+
 ## Scenario: Conversation View and Structured Message Parts
 
 ### 1. Scope / Trigger
@@ -22,13 +89,16 @@
 - The Conversation tab is the default. It displays only non-empty `text` parts from `user`/`assistant` messages as bubbles; system/developer injections, tool records, reasoning, metadata, and other roles are omitted from this view.
 - The Transcript tab remains the complete audit path for omitted non-text parts. The Conversation view must not fabricate a placeholder or empty bubble when a message has no visible text.
 - The Transcript tab remains independent and complete, including long-message folding and local message edit/delete/insert actions.
+- Every visible Conversation row exposes the same message action toolbar as Transcript. Copy uses the original message's editable text when available (otherwise flat content); edit, insert, and delete are exposed only when the original message satisfies the existing local-editability predicate.
+- When existing batch-selection mode is active, Conversation hides its single-message toolbar just as Transcript does; it must not create a competing mutation path.
+- Conversation edit/insert must first pass the existing edit-warning gate. Only after approval may the view switch to Transcript, where the original message index opens the existing edit/insert form. A rejected gate keeps the Conversation view active. Delete remains on the existing confirmation/mutation path without a forced view switch.
 - Search scans both flat `content` and part `content`. A hit in a collapsed part, or a jump from Timeline/Changes/Tools/Subtasks, switches to Conversation, opens the relevant detail section, and keeps the original message index as the coordinate.
 - When `parts` is absent or empty, the frontend conservatively maps user/assistant to `text`, tool to `tool_result`, system/injected prompts to `system`, and other roles to `unknown`.
 - Prompt injection detection must inspect the whole normalized content, not only its first line. Codex/agent user records can start with ordinary headings such as `SKILLS` and contain `<skills_instructions>`, `<permissions instructions>`, `<environment_context>`, `<collaboration_mode>`, `[workflow-state:...]`, or `### Available skills` later in the same block; these markers classify the part as `system`.
 - Local, WSL, and SSH use the same kind names. SSH remains read-only and this view contract never routes remote messages into local mutation commands.
 - V2 catalog writes every parsed part and rehydrates it in `part_index` order. Old catalog rows without part records fall back from role/content; parser version changes must invalidate/rebuild derived rows when classification changes.
 - Outside batch selection, the complete session row is one keyboard-accessible open target. Tree toggles, selection checkboxes, delete, and other explicit actions stop propagation. The existing detail request sequence remains the last-request-wins boundary.
-- Every virtualized Conversation row must expose the configured index attribute (`data-index`) on the same node passed to `measureElement`; otherwise expanded details keep the estimate height and overlap or leave blank gaps. Conversation rows reuse the Transcript avatar/stack/bubble layout so visible text and detail sections share the same geometry.
+- Every virtualized Conversation or Transcript row must expose the projected display index (`data-index`) on the same node passed to `measureElement`; the raw message index remains a separate coordinate for refs, editing, selection, search, and jumps. Mixing these coordinates in a descending projection makes virtual height measurements land on the wrong row and causes adjacent content to overlap or leave blank gaps. Conversation rows reuse the Transcript avatar/stack/bubble layout so visible text and detail sections share the same geometry.
 
 ### 4. Validation & Error Matrix
 
@@ -41,17 +111,23 @@
 | Search matches only hidden reasoning/tool/system text | Mark the original message index, expand the detail section, and center it |
 | Rapidly click two session rows | Select/load the second target; the first response cannot replace it |
 | Click tree toggle/delete/selection checkbox | Perform only that explicit action; do not open the session |
+| Conversation action targets a non-editable, SSH, or snapshot message | Show copy only; never expose a local mutation action |
+| Conversation edit/insert warning is rejected | Keep Conversation selected and do not create an edit/insert form |
+| Conversation edit/insert warning is approved | Switch to Transcript and open the existing form at the original message index |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: one assistant record contains reasoning, visible text, and a tool call; Conversation shows the answer and one expandable details section while Transcript stays byte-for-byte compatible at the message level.
 - Base: an old snapshot has only `role="user"` and `content`; Conversation displays it as ordinary text.
 - Good: consecutive system/tool/reasoning records disappear from Conversation while the same records remain available in Transcript.
+- Good: a visible local assistant row offers four actions; copy uses the original message content, while edit/insert switches to the existing Transcript form only after the warning is approved.
+- Base: a visible SSH or favorite-snapshot row offers copy but no mutation action.
 - Bad: derive Conversation only from role after structured parts exist, because mixed reasoning/tool content would remain merged into the visible answer.
 - Bad: remove or filter messages in the backend, because message-index links from Diff/Tools would shift.
 - Bad: classify only a user block whose first line says `Agents.md instructions for ...`; this leaks injected context that begins with a normal heading into the visible conversation.
 - Bad: render every `user`/`assistant` record as visible text without checking its parts; embedded system/developer context then appears as a user prompt.
 - Bad: measure a virtualized Conversation row without its `data-index`, or render detail-only rows outside the avatar/stack wrapper; expansion then produces stale heights or a layout unlike the Transcript tab.
+- Bad: render a second editing form in Conversation, which duplicates the established Transcript mutation path and risks index/form behavior drift.
 
 ### 6. Tests Required
 
@@ -59,7 +135,7 @@
 - Rust parser tests: embedded Codex context markers and `developer` response messages classify as `system` for both local and SSH parsers.
 - SSH history-core tests: exact kind parity and missing-parts deserialization compatibility.
 - V2 catalog test: write/read `history_message_parts` in order and fall back for rows without parts.
-- Frontend regression: default Conversation plus independent Transcript, adjacent-detail grouping, old snapshot fallback, hidden search/jump expansion, whole-row click, and action propagation.
+- Frontend regression: default Conversation plus independent Transcript, adjacent-detail grouping, old snapshot fallback, hidden search/jump expansion, whole-row click, and action propagation; verify the shared toolbar exposes copy for every visible row, limits mutations to local editable rows, and switches to the original-index Transcript form only after gate approval.
 - Run `npx tsc --noEmit`, focused Node history tests, `cargo test history --lib`, `cargo fmt -- --check`, and `cargo check`.
 - Manual desktop verification: Local/WSL/SSH, main checkout/Worktree, parent/subagent tree, batch selection, rapid row switching, keyboard opening, and `zh-CN`/`zh-TW`/`en-US` copy with 24-hour time.
 
@@ -78,6 +154,137 @@ const conversation = messages.filter((message) => message.role !== "tool");
 // Preserve message coordinates; classify parts only in the render projection.
 const rows = buildConversationRows(messages);
 const targetRow = rows.find((row) => row.messageIndices.includes(messageIndex));
+```
+
+#### Correct conversation-action transition
+
+```typescript
+const started = await startEditMessage(row.messageIndex, row.message);
+if (started) {
+  onDetailViewChange("transcript");
+}
+```
+
+## Scenario: Two-stage local smart history titles
+
+### 1. Scope / Trigger
+
+- Trigger: changing history session display titles, aliases, generated-title actions, history settings, search-hit labels, prompt-library labels, or automatic title scheduling.
+- Goal: keep the parser source title immediately available while layering an optional local generated title without mutating the source summary.
+
+### 2. Signatures
+
+- Renderer settings retain `HistorySmartTitleSettings`, extended with `customPrompt: string`; an empty string means the built-in system instruction.
+- The IPC name remains `history_title_generate(request: HistoryTitleGenerateRequest)`, but its Rust entrypoint is `pub(crate) async fn history_title_generate(...)`. `HistoryTitleGenerateRequest` must not gain a prompt field.
+- There is no SQLite migration or Provider protocol signature change. The Rust command reads `historySmartTitle.customPrompt` from local `settings.json` and calls the existing `post_text_request(..., system_prompt, candidate, ...)` adapter.
+
+### 3. Contracts
+
+- `displayTitle` precedence is exactly `alias.trim() > generatedTitle.trim() > source title.trim() > session id`.
+- Generated-title metadata is hydrated from `history_generated_titles` together with session metadata and overlaid on local summaries, favorite snapshots, cached remote summaries, search hits, and prompt-library labels. `summary.title` remains the source title.
+- Manual generation is allowed for old sessions and sessions with an alias. Alias remains the visible pin; a successful manual result is retained as the hidden fallback until the alias is cleared.
+- SSH sessions dispatch only after an online trusted detail is loaded; read-only local snapshots, summary-only cache, and offline detail never dispatch. Candidate extraction requires the first visible user text part and shares the Conversation classifier; injected context, tools, reasoning, metadata, empty, and attachment-only records do not qualify.
+- Automatic work is disabled by default, uses the persisted `enabledAt` watermark, is deduplicated by session key plus full candidate fingerprint, and is scheduled through one bounded FIFO queue. Disabling the setting cancels queued ownership and invalidates active automatic revisions.
+- The list toolbar and Settings -> History Sessions switch read and write the same persisted `historySmartTitle` object. Re-enabling records a new watermark; it does not reuse the previous one.
+- `historySmartTitle.customPrompt` is one global, local-only system instruction. The UI trims it before saving; missing, blank, NUL-containing, or over-4096-UTF-8-byte values normalize to `""`. The `historySmartTitle` sync classification remains `excluded`.
+- Prompt Save waits for the existing persisted settings update before showing its localized success toast. While that write is pending, Save/Restore cannot race; a write failure shows a localized failure toast and never reports success.
+- Rust snapshots settings at request start to validate the selected Provider/automatic state and select either the normalized custom prompt or the unchanged built-in fallback. The candidate remains a separate user/input field for Anthropic, Chat Completions, and Responses; it is never interpolated into the prompt. The completion guard takes a fresh snapshot only to preserve the existing provider-selection/automatic-disable result suppression.
+- `history_title_generate` must remain a Tauri async command and await a dedicated `spawn_blocking` worker for the existing non-`Send` title helper; do not wrap the Provider request in `tauri::async_runtime::block_on` inside a synchronous command. A slow Provider request must leave the renderer able to process normal interaction while the existing pending/duplicate guard remains authoritative.
+- `historyStore` records an in-memory `smartTitleInFlightSessionKeys` entry immediately after it accepts a manual or automatic generation request, before opening details, candidate extraction, or the Provider IPC wait. It removes that entry only when the same trigger still owns the session in `finally`, so a manual request replacing an automatic request cannot clear the newer loading state. This ephemeral set never changes persisted generated-title metadata or optimistically supplies a title.
+- Installed production and `npm run tauri dev` deliberately share the main SQLite database. Generated-title reserve and finish transactions must acquire the write lock with `BEGIN IMMEDIATE` before their read/write sequence and use the shared 15-second write-busy timeout. A remaining SQLite busy/locked result maps to the stable `history_title_database_busy` category, never to a Provider/network category.
+- All generated-title actions use `useI18n()` keys for `zh-CN`/`en-US`; existing `zh-TW` fallback remains valid. List and detail pending state combines persisted `generatedTitle.state === "pending"` with the in-flight set. The detail action shows the existing localized pending label with a loading icon, sets `aria-busy`, and disables repeat generation (and title clearing) without changing selection, filtering, or scroll position.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| No generated row or generated request fails | Show alias/source/session-id fallback immediately; automatic failures are silent |
+| Manual title action has no/invalid Provider or model | Preserve the source fallback, show a localized actionable reason, and open Session History settings; never expose raw provider errors |
+| Manual title request fails after dispatch | Map the stable backend failure category to a localized safe toast; do not discard the error category or expose response/config content |
+| Shared SQLite is busy while production and development builds both run | Wait at the title persistence boundary; if the bounded wait is exhausted, retain source/alias fallback and show a localized local-database-busy toast rather than Provider/network guidance |
+| Alias saved while a request is pending | Cancel/invalidate ownership; late result cannot become visible or overwrite the alias |
+| Generated title cleared | Remove visible generated text, preserve source title, and suppress automatic work for the current fingerprint until explicit manual generation |
+| Search or Prompt Library contains a titled session | Use the same display precedence as the list/detail view |
+| Provider/model selection is invalid | Keep the saved selection diagnosable, prevent enabling when off, and allow disabling when already on |
+| `customPrompt` is missing, blank, manually malformed, contains NUL, or exceeds 4096 UTF-8 bytes | Save/use `""` and fall back to the built-in instruction; never send the malformed value |
+| Prompt draft is malformed in Settings | Keep it unsaved, show a localized field error, and leave the last persisted effective prompt intact |
+| Prompt Save succeeds or fails | Show success only after the setting write fulfills; while it is pending disable repeat actions; on failure leave the persisted prompt unchanged and do not show success |
+| Prompt changes while a request is in flight | The sent request uses its start snapshot; the existing completion guard may still suppress the result if provider selection/automatic state changed |
+| Provider request takes several seconds | Keep normal desktop interaction responsive; immediately show the localized loading state in the detail button and matching list row, then clear it when the active request settles; duplicate generation stays blocked |
+| Locale changes | New title/settings copy changes language without changing time formatting |
+
+### 5. Good / Base / Bad Cases
+
+- Good: a saved 4096-byte-or-smaller custom prompt becomes the Provider system/instructions field while the first valid user message remains the separate candidate input.
+- Good: installed production and development builds both write the shared SQLite database; a short competing write clears within the 15-second bound and the title reservation/result persists without a second Provider request.
+- Base: an old settings file without `customPrompt`, or the user restoring default, produces the exact built-in behavior.
+- Bad: passing the prompt through `HistoryTitleGenerateRequest`, synchronizing it, or concatenating it with candidate text breaks renderer trust boundaries and protocol framing.
+- Bad: starting a deferred read transaction and then upgrading it to a write while another process writes; this can return SQLite busy/snapshot errors and must not be reported as a Provider, model, or network misconfiguration.
+
+### 6. Tests Required
+
+- Frontend type-check after store/component changes.
+- Rust unit tests for trim, blank, NUL, over-limit, custom selection, and built-in fallback; no real Provider call is required.
+- Source-contract test verifies the unchanged IPC request shape, settings migration/default, prompt editor controls, and backend-owned system prompt selection.
+- Source-contract test verifies the Tauri title-generation entrypoint is async and dispatches its non-`Send` helper with `spawn_blocking`; it also verifies Prompt success feedback follows the awaited settings write and an accepted title request creates/removes its local in-flight loading state.
+- Rust/source coverage verifies SQLite busy-code recognition, the 15-second bounded title-write wait, `BEGIN IMMEDIATE` write reservation, and the localized busy mapping.
+- Pure candidate/display tests for alias/generated/source/id precedence, Unicode-safe input truncation, injection markers, attachment-only records, old flat messages, and distinct source instances.
+- Manual desktop check for save/restore, settings/toolbar synchronization, old-session manual generation, alias pin, clear suppression, automatic watermark, pending/restart behavior, and Chinese/English copy.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+invoke("history_title_generate", { request: { ...request, customPrompt } });
+```
+
+#### Correct
+
+```rust
+let selection = settings_selection();
+let prompt = effective_prompt(selection.as_ref());
+request_title(&runtime, prompt, request.candidate_text.trim()).await;
+```
+
+#### Wrong shared-database persistence
+
+```rust
+let mut transaction = connection.begin().await?;
+let row = read_title_row(&mut transaction).await?;
+write_title_row(&mut transaction, row).await?;
+```
+
+#### Correct shared-database persistence
+
+```rust
+let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+let row = read_title_row(&mut transaction).await?;
+write_title_row(&mut transaction, row).await?;
+```
+
+#### Wrong long-running command wrapper
+
+```rust
+#[tauri::command]
+pub(crate) fn history_title_generate(request: HistoryTitleGenerateRequest) -> Result<HistoryGeneratedTitleMeta, String> {
+    tauri::async_runtime::block_on(history_title_generate_async(request))
+}
+```
+
+#### Correct long-running command wrapper
+
+```rust
+#[tauri::command]
+pub(crate) async fn history_title_generate(
+    request: HistoryTitleGenerateRequest,
+) -> Result<HistoryGeneratedTitleMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(history_title_generate_async(request))
+    })
+    .await
+    .map_err(|error| format!("history_title_task_failed: {error}"))?
+}
 ```
 
 ## Scenario: SSH Remote History Workspace
@@ -111,6 +318,70 @@ const targetRow = rows.find((row) => row.messageIndices.includes(messageIndex));
 - Manually switch rapidly between two SSH projects and between sessions while list/search/detail requests are in flight; only the latest context may render.
 - Verify exact project resume, multiple same-Host project selection, original remote location, current-client Tab jump, active-elsewhere refusal, missing source/cwd, custom config root, and Hook-not-installed behavior.
 - Disconnect after a successful sync and verify cached summaries remain visible with stale/offline state while uncached detail stays unavailable.
+
+## Scenario: SSH History Capability Aligns With the Remote Bridge
+
+### 1. Scope / Trigger
+
+- Trigger: changing SSH project capabilities, supported remote history CLI sources, or a project/terminal history entry point.
+- Goal: prevent an unsupported SSH CLI from reaching `buildSshAgentHistoryContext()` and exposing its internal `history_remote_source_required` guard to the user.
+
+### 2. Signatures
+
+- SSH source resolver: `resolveSshToolSource(command: string | null | undefined): SshToolSource | null`.
+- Capability gate: `projectSupportsCapability(project, "history"): boolean`.
+- UI reason helpers: `isSshHistorySourceUnsupported(project)` and `isSshGrokHistoryUnsupported(project)`.
+- Defensive bridge guard: `buildSshAgentHistoryContext(project)`.
+
+### 3. Contracts
+
+- SSH `history` is available only when `resolveSshToolSource(project.cli_tool)` resolves to the currently bridge-supported Claude or Codex source.
+- SSH Grok Build, another unsupported SSH CLI, and an SSH project without a configured CLI all have `history=false`; this does not alter `statistics` or unrelated project capabilities.
+- Local and WSL Kimi Code keep native history (list/delete/resume/realtime stats under `$KIMI_CODE_HOME` / `~/.kimi-code`). SSH Kimi uses the generic unsupported SSH-history prompt.
+- Local and WSL Grok Build keep their native history capability. Do not infer remote support from the local history-source registry.
+- Sidebar and terminal-toolbar history entry points must stop at the capability gate. Grok uses the localized `remoteCapabilities.grokHistoryUnsupportedTitle`; another unsupported SSH CLI uses the generic SSH-history title and description.
+- `history_remote_source_required` remains a defensive bridge error for non-UI callers. Normal UI interactions must not reach it.
+- `HistoryWorkspace` must derive its selectable project list from `projectSupportsCapability(project, "history")`; do not add a second Grok-only filter.
+
+### 4. Validation & Error Matrix
+
+| Condition | Capability / UI result |
+| --- | --- |
+| SSH Claude or Codex command | `history=true`; existing remote bridge opens |
+| SSH Grok Build command | `history=false`; show Grok localized unavailable toast; do not open the bridge |
+| SSH unsupported or empty CLI command | `history=false`; show generic SSH CLI unavailable toast |
+| Local or WSL Grok Build | `history=true`; retain existing native history flow |
+| Direct invalid bridge caller | `history_remote_source_required` remains a defensive error |
+
+### 5. Good / Base / Bad Cases
+
+- Good: the sidebar and terminal toolbar both show the same Grok-specific toast and leave the current workspace unchanged.
+- Base: an unsupported SSH OpenCode project receives the generic message instead of being mislabeled as Grok.
+- Good: SSH Claude/Codex and local/WSL Grok continue to pass the same capability API.
+- Bad: leave `SSH_CAPABILITIES.history=true` for every SSH project and catch `history_remote_source_required` separately in each caller.
+- Bad: disable every Grok history flow, including local/WSL, because the SSH bridge has not implemented Grok.
+
+### 6. Tests Required
+
+- Run `node --test scripts/projectCapabilities.test.mjs` and assert SSH Claude/Codex allow history, SSH Grok/unsupported/empty CLI deny it, local/WSL Grok remain allowed, and SSH Grok statistics remain unchanged.
+- Assert both project history entry components use the shared helper and i18n keys.
+- Run `node --test scripts/sshRemoteFileContext.test.mjs`, `npx tsc --noEmit`, and `npm run build`.
+- Manually verify both sidebar and terminal-toolbar entries in `zh-CN` and `en-US`; no raw internal error may be shown.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+const SSH_CAPABILITIES = { history: true };
+await buildSshAgentHistoryContext(project);
+```
+
+#### Correct
+
+```typescript
+if (capability === "history" && isSshHistorySourceUnsupported(project)) return false;
+```
 
 ## Scenario: Favorite Session Snapshots
 
@@ -596,3 +867,96 @@ const command = buildHistoryResumeCommand(session, project);
 <img src={getMaterialFileIcon(fileName)} alt="" />
 <GitDiffViewer filePath={path} fileName={fileName} status={status} diffText={patch} />
 ```
+
+## Scenario: History detail ordering and remembered direction
+
+### 1. Scope / Trigger
+
+- Trigger: changing the ordering controls or pagination of the Conversation, Transcript, Timeline, Changes, Tools, or Subtasks detail views.
+- Goal: expose a stable ascending/descending projection without changing raw message coordinates or the existing Canvas/Context semantics.
+
+### 2. Signatures
+
+- Setting: `Settings.historyDetailSortDirections` is a complete per-view map of `ascending | descending` values.
+- Message projection: `{ message: HistoryMessage, messageIndex: number }[]` preserves the source-array coordinate while changing display order.
+
+### 3. Contracts
+
+- The six sortable views default to ascending and persist one direction per view across sessions, history workspace reopen, and application restart. Canvas and Context have no ordering control.
+- Conversation and Transcript filter/display `activeSession.messages` through a projection; descending mode starts at the array tail and expands toward earlier raw indexes when loading more. Never use the visible-window index as an edit, selection, search, or jump coordinate.
+- Search and cross-view jumps retain raw `messageIndex`; match navigation follows the current visual direction. Direction changes reset to that direction's first visible item unless an active target must be restored.
+- Structured views filter first, then reverse only their time-sequence records. Changes keep file-name order, Tools keep aggregate counts, Subtasks keep the main-session root, and no view mutates its cached source array.
+- The dedicated settings action updates memory before persistence, serializes writes, and logs persistence failure without rolling back the current UI direction.
+- The toggle is a native keyboard-accessible button with localized label/tooltip, `aria-pressed`, and no hardcoded user-visible text.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Missing or malformed setting | Fill each known view with ascending and ignore unknown keys |
+| Descending long transcript | Render newest available messages first; load older raw indexes at the display tail |
+| Search/edit/jump in descending mode | Resolve the original `messageIndex`, never the projected row number |
+| Persistence write fails | Keep the immediate direction in memory, log the failure, and allow later writes |
+| Canvas or Context selected | Keep existing layout/statistical semantics and hide the ordering control |
+
+### 5. Tests Required
+
+- Pure projection tests cover both directions, tail-first pagination, stable raw indexes, and independent per-view defaults.
+- Source/interaction tests cover structured filter-then-reverse behavior, aggregate/statistical ordering exceptions, persistence migration/write serialization, and Canvas/Context exclusion.
+- Run `npx tsc --noEmit`, `npm run build`, and the focused history Node tests; manually verify `zh-CN`, `zh-TW`, and `en-US` copy with 24-hour time.
+
+## Scenario: Answer Stars in the Terminal Markdown Preview
+
+### 1. Scope / Trigger
+
+- Trigger: changing how per-answer stars are stored, resolved, displayed, or filtered in the terminal Markdown preview answer list.
+- Goal: let a user mark individual answers and find them later, without letting a rewritten conversation make a star point at the wrong answer.
+
+### 2. Signatures
+
+- SQLite table: `message_stars` (migration `41`, `MIGRATION_CREATE_MESSAGE_STARS_VERSION`)
+  - `session_key TEXT NOT NULL`
+  - `message_index INTEGER NOT NULL` (source-array coordinate, not the 1-based display order)
+  - `timestamp TEXT` (redundant; enables index-drift self-healing)
+  - `source TEXT NOT NULL`, `session_id TEXT NOT NULL`, `created_at INTEGER NOT NULL`
+  - `PRIMARY KEY (session_key, message_index)`
+- `readMessageStars(sessionKey) -> MessageStarRow[]` (throws on failure), `writeMessageStar(input)`, `deleteMessageStar(sessionKey, messageIndex)`
+- Store: `useMessageStarStore` (`bySession`, `failure`, `ensureLoaded`, `setStar`)
+- Pure resolver: `resolveStarredMessageIndexes(messages, rows) -> Map<number, MessageStarRow>`
+- Host identity: `summarySessionKey(detail)` from `src/features/history/index.ts`; `messageIndex` is the source `detail.messages` index.
+
+### 3. Contracts
+
+- Stars are keyed by `(session_key, message_index)` and stay local: no `settingsStore`, no WebDAV sync, matching `session_meta` / `session_favorite_snapshots`.
+- `message_index` is the raw `detail.messages` coordinate. Never store or compare the 1-based list order (`MarkdownPreviewMessage.order`), which shifts whenever a non-assistant message is added.
+- Resolution is index-first, timestamp-second. A row is accepted at its stored index only when the timestamp also matches; otherwise the star follows the timestamp to the answer's new index. An unresolvable star is dropped from the UI (never pointed at a neighbour) while its row stays for a later match.
+- Two rows must never resolve to the same index; keep the first by ascending `message_index`.
+- Reads are cached per session key. A failed read must leave `bySession[key]` as `undefined` so a later trigger retries; it must not be cached as "loaded with no stars".
+- Writes are optimistic with rollback to the pre-write rows on failure. Unstarring deletes the resolved row's real `message_index`, which may differ from the displayed answer's index.
+- Star failures must be visible, not just logged. A failed read or write sets `failure` on the store; the preview shows `terminal.markdownPreview.starUnavailable` above the body while it is set, and any successful read or write clears it. Without this, a missing `message_stars` table only presents as a star that flickers and reverts — the panel body, the row stars, and the floating star all fail for that one reason.
+- The row star lives inside a Radix `role="option"`, so it must swallow pointerdown/pointerup/click and Space/Enter, otherwise the item selects and the menu closes. It is `tabIndex={-1}`: marking an answer is a pointer-only action by design, and a floating star on the current answer is not an accepted alternative (removed on user feedback).
+- "Starred only" filters the list and never changes the rendered answer. When the selected answer is filtered out the trigger uses `value=undefined` plus `placeholder`; it must not fall back to the first starred answer, because the trigger label would then describe a different answer than the body.
+- Filter state resets with session identity (`key={previewSessionKey}`); replacing the list wholesale resets the list scroll offset.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Row index matches and timestamp matches | Star renders at that index |
+| Row index matches, timestamp differs or is absent | Re-resolve by timestamp; drop if nothing matches |
+| `/rewind` or compaction shifted indexes | Star follows the timestamp to the new index |
+| Answer no longer in the transcript | Star hidden, row retained, no mispoint |
+| Two rows resolve to one index | Only the lowest `message_index` row renders |
+| Read fails | Log, set `failure`, leave the session uncached, retry on a later trigger |
+| Write fails | Restore the previous rows for that session, log, set `failure` |
+| A later read or write succeeds | Clear `failure` so the notice disappears |
+| Migrations not applied yet (`message_stars` missing) | Both stars revert after the optimistic write; the failure notice explains why instead of appearing to ignore clicks |
+| Session key empty | `readMessageStars` returns `[]` without touching the database |
+
+### 5. Tests Required
+
+- `scripts/messageStars.test.mjs` covers index+timestamp validation, timestamp follow-up after a rewind, index reuse, missing answers, duplicate rows, per-session caching with a retryable failure, optimistic write with rollback, real-row deletion, and the failure signal being set on a failed read/write and cleared by a later success.
+- `scripts/terminalMarkdownPreviewNavigation.test.mjs` covers pointer/key isolation on the inline star, the starred-only filter with placeholder degradation, the empty state, the trigger value, and the failure notice appearing above the body and disappearing once the store recovers.
+- Run `npx tsc --noEmit` after frontend changes and `cd src-tauri && cargo test --lib message_star` after migration changes.
+- Migration `41` only runs when the Rust process builds its pool, so an already-running dev instance keeps failing every star write until it is restarted. Verify with a read-only query for `MAX(version)` on `_sqlx_migrations` and for `message_stars` in `sqlite_master` before treating a write failure as a code bug.
+- Manual desktop check: star answers in two different sessions, restart the app, confirm the stars persist and "starred only" lists exactly those answers with the body unchanged.

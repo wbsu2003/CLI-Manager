@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 
-const source = readFileSync(new URL("../src/lib/terminalFileLinks.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../src/features/terminal/lib/terminalFileLinks.ts", import.meta.url), "utf8");
 const transpiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 }).outputText;
 const {
   findTerminalFileLinks,
   findTerminalRelativeFileLinks,
+  resolveTerminalFileSystemPath,
   terminalStringRangeToBufferColumns,
 } = await import(`data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`);
 
@@ -28,21 +29,29 @@ test("absolute file links preserve line locations with diagnostic suffixes", () 
   assert.equal(match.columnNumber, 3);
 });
 
+test("slash-prefixed Windows file links retain their target path", () => {
+  const path = "/F:/github/smart-home/demo3/knx-workspace/initial-quote-v1/project.knxproj";
+  const [match] = findTerminalFileLinks(path);
+
+  assert.equal(match.path, path);
+  assert.equal(resolveTerminalFileSystemPath(match.path), path.slice(1));
+});
+
 test("relative file links strip trailing source symbols", () => {
-  const [match] = findTerminalRelativeFileLinks("src/components/TerminalTabs.tsx:handleToggleFilesPanel");
-  assert.equal(match.text, "src/components/TerminalTabs.tsx:handleToggleFilesPanel");
-  assert.equal(match.path, "src/components/TerminalTabs.tsx");
+  const [match] = findTerminalRelativeFileLinks("src/features/terminal/index.ts:handleToggleFilesPanel");
+  assert.equal(match.text, "src/features/terminal/index.ts:handleToggleFilesPanel");
+  assert.equal(match.path, "src/features/terminal/index.ts");
 });
 
 test("relative file links split Chinese enumeration separators", () => {
   const matches = findTerminalRelativeFileLinks(
-    "src/components/files/FileExplorerSidebar.tsx:438、src/components/files/FileExplorerSidebar.tsx:1047",
+    "src/features/files/api/FileExplorerSidebar.tsx:438、src/features/files/api/FileExplorerSidebar.tsx:1047",
   );
   assert.deepEqual(
     matches.map(({ path, lineNumber }) => ({ path, lineNumber })),
     [
-      { path: "src/components/files/FileExplorerSidebar.tsx", lineNumber: 438 },
-      { path: "src/components/files/FileExplorerSidebar.tsx", lineNumber: 1047 },
+      { path: "src/features/files/api/FileExplorerSidebar.tsx", lineNumber: 438 },
+      { path: "src/features/files/api/FileExplorerSidebar.tsx", lineNumber: 1047 },
     ],
   );
 });

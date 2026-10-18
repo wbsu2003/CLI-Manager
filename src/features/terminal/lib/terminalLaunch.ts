@@ -1,0 +1,862 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { Project, NativeProviderLaunchSnapshot, TerminalSession } from "../../../shared/types/index";
+import type { ExtensionCli, ProjectExtensionLaunchPlan } from "../../../shared/types/extensions";
+import { createAgentTerminalMetadata, resolveAgentTerminalMetadata } from "../../agents/api/agentTerminal";
+import { logError, logWarn } from "../../../shared/platform/logger";
+import {
+  appendResumeCliArgs, isDirectCodexStartupCommand, normalizeDirectCodexStartupCommand,
+  resolveProjectStartupCommand as resolveProjectCommand, withClaudeMcpConfigPath, withClaudeSettingsPath,
+  withCodexConfigOverrides, withCodexProfile, withCodexNoDaemon,
+  withCodexLightTuiTheme, withGrokModelOverride,
+} from "../../projects/api/projectStartupCommand";
+import { getTerminalTheme } from "../../../shared/lib/terminalThemes";
+import { normalizeHexColor } from "../../../shared/lib/terminalColor";
+import { useSettingsStore } from "../../../shared/preferences/settingsStore";
+import {
+  defaultShellForOs, getOsPlatform, normalizeShellForOs, normalizeShellKey, type OsPlatform,
+  type ShellKey,
+} from "../../../shared/platform/shell";
+import { getProviderSwitchAppType, isExactCodexProject, parseProjectEnvVars } from "../../providers/api/providerSwitching";
+import { useProjectStore } from "../../projects/api/projectStore";
+import { useSshHostStore } from "../../remote/api/sshHostStore";
+import { useSshAgentIntegrationStore } from "../../remote/api/sshAgentIntegrationStore";
+import { buildSshConnectionSpec } from "../../remote/api/ssh";
+import { parseStoredSshHookReport, resolveSshToolSource } from "../../remote/api/sshToolIntegration";
+import { getSshClientInstanceId } from "../../remote/api/sshClientIdentity";
+import { isValidGrokSessionId, isValidKimiSessionId } from "../../history/api/resumeCliArgs";
+import {
+  terminalProcessManager, type TerminalClaudeProviderLaunchConfig,
+  type TerminalCodexProviderLaunchConfig, type TerminalGrokProviderLaunchConfig,
+} from "../api/TerminalProcessManager";
+import {
+  type OpenCodeHookStatusPayload, type DetachedPtyLaunchOptions,
+  type DetachedPtyLaunchResult, type ProviderLaunchSnapshotResponse, type ResolvedPtyLaunch,
+} from "../types/terminalStoreTypes";
+import { joinStartupCommandLines } from "./startupCommandText";
+import { SHELL_RUNTIME_MONITORING_ENV } from "./terminalStatus";
+import {
+  garbageCollectProjectExtensionSnapshots as garbageCollectProjectExtensionSnapshotsApi,
+  prepareProjectExtensionLaunch,
+  releaseProjectExtensionSnapshot as releaseProjectExtensionSnapshotApi,
+} from "../../extensions/api/projectPolicy";
+
+import { isDeepSeekTuiTool, isDeepSeekTuiCommand, isDeepSeekTuiLauncherCommand, buildDeepSeekTuiResumeCommand, prepareDeepSeekTuiCommand, withDeepSeekTuiPatch, withDeepSeekTuiPreload, stripDeepSeekTuiManagerPatch, getDeepSeekTuiCommandSourceRoot } from "../../../shared/lib/deepseekTui";
+import { deepSeekLaunchError } from "../../projects/api/deepseekSource";
+
+/** Localize project launch validation at the existing public-command boundary. */
+function resolveProjectStartupCommand(...args: Parameters<typeof resolveProjectCommand>) {
+  try { return resolveProjectCommand(...args); }
+  catch (error) { throw deepSeekLaunchError(error); }
+}
+
+export function supportsShellRuntimeInjection(shell?: string | null): boolean {
+  const normalized = normalizeShellKey(shell);
+  return (
+    normalized === "powershell" ||
+    normalized === "pwsh" ||
+    normalized === "cmd" ||
+    normalized === "gitbash"
+  );
+}
+
+export function isShellRuntimeMonitoringEnabled(): boolean {
+  return useSettingsStore.getState().shellRuntimeMonitoringEnabled;
+}
+
+export function resolveShellForPty(shell: string | null | undefined, hasProject: boolean, os: OsPlatform): string | null {
+  const inputShell = normalizeShellForOs(shell, os);
+  if (inputShell) return inputShell;
+  const customShell = shell?.trim();
+  if (customShell && !normalizeShellKey(customShell)) return customShell;
+  if (hasProject) return null;
+  return normalizeShellForOs(useSettingsStore.getState().defaultShell, os) ?? defaultShellForOs(os);
+}
+
+export function isLightHexColor(value: string | undefined): boolean {
+  if (!value || !/^#[0-9a-f]{6}$/i.test(value)) return false;
+  const r = Number.parseInt(value.slice(1, 3), 16);
+  const g = Number.parseInt(value.slice(3, 5), 16);
+  const b = Number.parseInt(value.slice(5, 7), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160;
+}
+
+export function isCurrentTerminalBackgroundLight(): boolean {
+  const settings = useSettingsStore.getState();
+  const theme = getTerminalTheme(settings.terminalThemeName, settings.resolvedTheme, settings.lightThemePalette, settings.darkThemePalette);
+  return isLightHexColor(theme.background);
+}
+
+export function getCurrentTerminalColors() {
+  const settings = useSettingsStore.getState();
+  const theme = getTerminalTheme(
+    settings.terminalThemeName,
+    settings.resolvedTheme,
+    settings.lightThemePalette,
+    settings.darkThemePalette,
+  );
+  return {
+    foreground: normalizeHexColor(settings.terminalTextColor || theme.foreground, "#d8dee9"),
+    background: normalizeHexColor(
+      theme.background,
+      settings.resolvedTheme === "dark" ? "#0c0e10" : "#ffffff",
+    ),
+  };
+}
+
+// Codex 的共享 app-server 会保留首个 PTY 的 Hook 环境；自动启动必须使用独立服务。
+// --no-daemon 同时禁止复用已经运行的服务；手工输入仍由终端原样处理。
+// SSH bootstrap 绕过后续 PTY 格式化器，必须在共同的准备阶段先完成多行拼接。
+export function prepareStartupCommandForPty(command: string | undefined, shell: ShellKey | null): string | undefined {
+  const singleLineCommand = command === undefined ? undefined : joinStartupCommandLines(command, shell);
+  const prepared = withCodexNoDaemon(singleLineCommand);
+  if (!prepared || shell !== "gitbash" || !isCurrentTerminalBackgroundLight()) return prepared;
+  return withCodexLightTuiTheme(prepared);
+}
+
+export const CODEX_COMMAND_PATTERN = /(?:^|\s)codex(?:\.(?:cmd|exe|ps1))?(?:\s|$)/i;
+
+export const CLAUDE_COMMAND_PATTERN = /(?:^|\s)claude(?:\.(?:cmd|exe|ps1))?(?:\s|$)/i;
+
+export const GROK_COMMAND_PATTERN = /(?:^|\s)grok(?:\.(?:cmd|exe|ps1))?(?:\s|$)/i;
+
+export const KIMI_COMMAND_PATTERN = /(?:^|\s)kimi(?:\.(?:cmd|exe|ps1))?(?:\s|$)/i;
+
+export function detectCliResumeKind(
+  startupCmd: string | undefined,
+  project: Project | undefined
+): "claude" | "codex" | "grok" | "kimi" | "deepseek-tui" | null {
+  const cmd = startupCmd?.trim() ?? "";
+  // TUI owns its profile/session protocol; never route it through a provider CLI fallback.
+  if (isDeepSeekTuiCommand(cmd) || (project && isDeepSeekTuiTool(project.cli_tool))) return "deepseek-tui";
+  const projectKind = project ? getProviderSwitchAppType(project) : null;
+  const cliTool = project?.cli_tool?.trim().toLowerCase() ?? "";
+  // codex 优先：codex 项目可能带自定义 startupCmd，仍应当 codex resume。
+  if (projectKind === "codex" || (project ? isExactCodexProject(project) : false) || CODEX_COMMAND_PATTERN.test(cmd)) {
+    return "codex";
+  }
+  if (projectKind === "claude" || CLAUDE_COMMAND_PATTERN.test(cmd)) {
+    return "claude";
+  }
+  if (cliTool.includes("grok") || GROK_COMMAND_PATTERN.test(cmd)) {
+    return "grok";
+  }
+  if (cliTool.includes("kimi") || KIMI_COMMAND_PATTERN.test(cmd)) {
+    return "kimi";
+  }
+  return null;
+}
+
+export function buildCliResumeStartupCommand(
+  kind: "claude" | "codex" | "grok" | "kimi" | "deepseek-tui",
+  cliSessionId: string | undefined,
+  project: Project | undefined,
+  options: { includeProviderOverrides?: boolean; startupCmd?: string; shell?: string | null } = {},
+): string {
+  if (kind === "deepseek-tui") {
+    const command = isDeepSeekTuiCommand(options.startupCmd) ? options.startupCmd!
+      : (project ? resolveProjectStartupCommand(project) : undefined) ?? "dsh-tui";
+    return buildDeepSeekTuiResumeCommand(command, cliSessionId, options.shell ?? project?.shell);
+  }
+  const id = cliSessionId?.trim();
+  const hasValidId = !!id && !/\s/.test(id) && !/[\r\n]/.test(id);
+  if (kind === "codex") {
+    const base = hasValidId ? `codex resume --no-alt-screen ${id}` : "codex resume --no-alt-screen --last";
+    return appendResumeCliArgs(base, "codex", project ?? null, options);
+  }
+  if (kind === "grok") {
+    // Align with Claude: no --no-alt-screen by default. No id → cwd-scoped continue.
+    const base = hasValidId && isValidGrokSessionId(id) ? `grok --resume ${id}` : "grok --continue";
+    return appendResumeCliArgs(base, "grok", project ?? null, options);
+  }
+  if (kind === "kimi") {
+    const base = hasValidId && isValidKimiSessionId(id)
+      ? `kimi --session ${id}`
+      : "kimi --continue";
+    return appendResumeCliArgs(base, "kimi", project ?? null, options);
+  }
+  const base = hasValidId ? `claude --resume ${id}` : "claude --continue";
+  return appendResumeCliArgs(base, "claude", project ?? null, options);
+}
+
+/** An empty environment value is still an explicit TUI resume target; fresh launches must unset it. */
+export function clearDeepSeekTuiResumeBeforeStartup(command: string, shell: string | null | undefined): string {
+  const key = normalizeShellKey(shell);
+  if (key === "powershell" || key === "pwsh") return `$env:DSH_TUI_RESUME_SESSION=$null; ${command}`;
+  if (key === "cmd") return `set "DSH_TUI_RESUME_SESSION=" & ${command}`;
+  if (key === "fish") return `set -e DSH_TUI_RESUME_SESSION; ${command}`;
+  if (["bash", "zsh", "sh", "gitbash", "wsl"].includes(key ?? "")) return `unset DSH_TUI_RESUME_SESSION; ${command}`;
+  throw deepSeekLaunchError(new Error("deepseek_shell_unsupported"));
+}
+
+/** Explicit launch targets seed the Tab even before a bridge is available (SSH/WSL). */
+export function getDeepSeekTuiLaunchSessionId(launch: ResolvedPtyLaunch): string | undefined {
+  if (!isDeepSeekTuiCommand(launch.persistedStartupCmd ?? launch.startupCmd)) return undefined;
+  const id = launch.invokeArgs.envVars?.DSH_TUI_RESUME_SESSION
+    ?? launch.invokeArgs.sshLaunch?.environmentOverrides.DSH_TUI_RESUME_SESSION;
+  return id || undefined;
+}
+
+export function buildDirectCodexLaunchCommand(command: string): string {
+  const normalized = normalizeDirectCodexStartupCommand(command) ?? command.trim();
+  return `\x0c${normalized}`;
+}
+
+// PTY 写入前再次规范化，兼容手动调用和旧会话延迟重放；已准备的单行命令不会重复修改。
+// SSH 由 prepareStartupCommandForPty 先规范化；这里只为本地 PTY 追加 Codex 清屏前缀和回车。
+export function formatStartupInputForPty(command: string, shell?: ShellKey | null): string {
+  const singleLineCommand = joinStartupCommandLines(command, shell ?? null);
+  if (!isDirectCodexStartupCommand(singleLineCommand)) return `${singleLineCommand}\r`;
+  return `${buildDirectCodexLaunchCommand(singleLineCommand)}\r`;
+}
+
+export function formatManualDirectCodexInputForPty(command: string, shell?: ShellKey | null): string {
+  return formatStartupInputForPty(command, shell ?? null);
+}
+
+export const HOOK_RUNNING_TIMEOUT_MS = 30 * 60 * 1000;
+
+// 回调地址属于当前应用实例，不依赖安装健康度；另一版本的 Hook 可执行文件也应回调当前 PTY。
+// 启动检查不得因路径不同/部分安装而沿用父进程端口，也不在启动终端时重写共享 Hook 配置。
+export async function shouldEnableHookEnv(): Promise<boolean> {
+  const settings = useSettingsStore.getState();
+  if (
+    settings.claudeHookBridgeEnabled || settings.codexHookBridgeEnabled || settings.kimiHookBridgeEnabled
+    || settings.piHookBridgeEnabled || settings.grokHookBridgeEnabled
+  ) return true;
+
+  // OpenCode 没有上述逐工具开关，保留已安装插件的独立启用判定。
+  try {
+    const openCodeStatus = await invoke<OpenCodeHookStatusPayload>("opencode_hook_status");
+    return openCodeStatus.status === "installed";
+  } catch (err) {
+    logError("opencode_hook_status failed while deciding terminal hook env", { err });
+    return false;
+  }
+}
+
+export function buildPtyEnvVars(
+  envVars?: Record<string, string> | null,
+  shell?: string | null
+): Record<string, string> | null {
+  const next = { ...(envVars ?? {}) };
+  if (isShellRuntimeMonitoringEnabled() && supportsShellRuntimeInjection(shell)) {
+    next[SHELL_RUNTIME_MONITORING_ENV] = "1";
+  } else {
+    delete next[SHELL_RUNTIME_MONITORING_ENV];
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
+
+export function getProjectAgentTerminalMetadata(projectId?: string) {
+  const project = projectId
+    ? useProjectStore.getState().projects.find((item) => item.id === projectId)
+    : undefined;
+  return createAgentTerminalMetadata(project);
+}
+
+export function getRestoredAgentTerminalMetadata(
+  session: Pick<TerminalSession, "isAgentSession" | "cliTool"> | null | undefined,
+  projectId?: string
+) {
+  const project = projectId
+    ? useProjectStore.getState().projects.find((item) => item.id === projectId)
+    : undefined;
+  return resolveAgentTerminalMetadata(session, project);
+}
+
+export async function prepareProviderLaunchSnapshot(
+  project: Project | null,
+  startupCmd: string | null | undefined,
+  worktreeId?: string,
+  persistedSnapshot?: NativeProviderLaunchSnapshot | null,
+  providerId?: string | null,
+): Promise<ProviderLaunchSnapshotResponse | null> {
+  if (persistedSnapshot) releaseProviderSnapshot(persistedSnapshot);
+  const appType = project ? getProviderSwitchAppType(project) : null;
+  if (!project || !appType) return null;
+  if (!startupCmd?.trim()) return null;
+  // 跟随全局时后端返回 null：全局 apply 已写入真实 Home，启动无需任何供应商参数。
+  return invoke<ProviderLaunchSnapshotResponse | null>("provider_scope_prepare", {
+    input: {
+      appType,
+      projectId: project.id,
+      worktreeId: worktreeId ?? null,
+      providerId: providerId?.trim() || null,
+    },
+  });
+}
+
+export function buildNativeProviderLaunchConfigs(
+  snapshot: ProviderLaunchSnapshotResponse | null,
+): {
+  claudeProvider: TerminalClaudeProviderLaunchConfig | null;
+  codexProvider: TerminalCodexProviderLaunchConfig | null;
+  grokProvider: TerminalGrokProviderLaunchConfig | null;
+} {
+  if (!snapshot) {
+    return { claudeProvider: null, codexProvider: null, grokProvider: null };
+  }
+  if (snapshot.appType === "claude") {
+    if (!snapshot.claudeSettingsPath) throw new Error("provider_snapshot_missing");
+    return {
+      claudeProvider: {
+        appType: "claude",
+        providerId: snapshot.providerId,
+        snapshotId: snapshot.snapshotId,
+        claudeSettingsPath: snapshot.claudeSettingsPath,
+      },
+      codexProvider: null,
+      grokProvider: null,
+    };
+  }
+  if (snapshot.appType === "codex") {
+    if (snapshot.generatedHome || (!snapshot.codexProfileName && snapshot.configOverrides.length === 0)) {
+      throw new Error("provider_snapshot_missing");
+    }
+    return {
+      claudeProvider: null,
+      codexProvider: {
+        appType: "codex",
+        providerId: snapshot.providerId,
+        snapshotId: snapshot.snapshotId,
+      },
+      grokProvider: null,
+    };
+  }
+  if (snapshot.generatedHome || !snapshot.grokModel?.trim()) {
+    throw new Error("provider_snapshot_missing");
+  }
+  return {
+    claudeProvider: null,
+    codexProvider: null,
+    grokProvider: {
+      appType: "grokbuild",
+      providerId: snapshot.providerId,
+      snapshotId: snapshot.snapshotId,
+      grokModel: snapshot.grokModel,
+    },
+  };
+}
+
+export async function garbageCollectProviderSnapshots(sessions: TerminalSession[]): Promise<void> {
+  try {
+    await invoke("provider_scope_gc_snapshots", {
+      activeSnapshotIds: sessions
+        .map((session) => session.providerSnapshot?.snapshotId)
+        .filter((snapshotId): snapshotId is string => Boolean(snapshotId?.trim())),
+    });
+  } catch (err) {
+    logWarn("provider snapshot garbage collection failed", { err });
+  }
+}
+
+export function releaseProviderSnapshot(snapshot: NativeProviderLaunchSnapshot | null | undefined): void {
+  const snapshotId = snapshot?.snapshotId?.trim();
+  if (!snapshotId) return;
+  void invoke("provider_scope_release_snapshot", { snapshotId }).catch((err) => {
+    logWarn("provider snapshot release failed", { snapshotId, err });
+  });
+}
+
+export async function garbageCollectProjectExtensionSnapshots(sessions: TerminalSession[]): Promise<void> {
+  try {
+    await garbageCollectProjectExtensionSnapshotsApi(
+      sessions
+        .map((session) => session.extensionSnapshotId)
+        .filter((snapshotId): snapshotId is string => Boolean(snapshotId?.trim())),
+    );
+  } catch (err) {
+    logWarn("project extension snapshot garbage collection failed", { err });
+  }
+}
+
+export function releaseProjectExtensionSnapshot(snapshotId: string | null | undefined): void {
+  const normalizedId = snapshotId?.trim();
+  if (!normalizedId) return;
+  void releaseProjectExtensionSnapshotApi(normalizedId).catch((err) => {
+    logWarn("project extension snapshot release failed", { snapshotId: normalizedId, err });
+  });
+}
+
+function inferWslDistro(value: string | null | undefined): string | null {
+  const normalized = value?.trim() ?? "";
+  if (!normalized) return null;
+  const uncMatch = /^\\\\(?:wsl\.localhost|wsl\$)\\([^\\/]+)(?:[\\/]|$)/i.exec(normalized);
+  return uncMatch?.[1]?.trim() || null;
+}
+
+function resolveExtensionEnvironment(
+  project: Project | undefined,
+  cwd: string | null | undefined,
+  shell: string | null | undefined,
+  os: OsPlatform,
+): { environmentKind: "local" | "wsl"; environmentId: string } | null {
+  if (!project || project.environment_type === "ssh") return null;
+  const isWsl = project.environment_type === "wsl"
+    || (os === "windows" && normalizeShellKey(shell) === "wsl");
+  if (!isWsl) return { environmentKind: "local", environmentId: "host" };
+  const distro = inferWslDistro(cwd) ?? inferWslDistro(project.path);
+  return distro ? { environmentKind: "wsl", environmentId: distro } : null;
+}
+
+function extensionCliForProject(project: Project | undefined): ExtensionCli | null {
+  const appType = project ? getProviderSwitchAppType(project) : null;
+  if (appType === "claude" || appType === "codex") return appType;
+  if (appType === "grokbuild") return "grok";
+  return null;
+}
+
+function extensionLaunchStatus(
+  mcpStatus: ProjectExtensionLaunchPlan["mcpStatus"],
+  skillStatus: ProjectExtensionLaunchPlan["skillStatus"],
+): "applied" | "globalOnly" | "error" {
+  if (mcpStatus === "error" || skillStatus === "error") return "error";
+  if (mcpStatus === "globalOnly" || skillStatus === "globalOnly") return "globalOnly";
+  return "applied";
+}
+
+export async function resolvePtyLaunch(options: DetachedPtyLaunchOptions, os: OsPlatform): Promise<ResolvedPtyLaunch> {
+  releaseProjectExtensionSnapshot(options.extensionSnapshotId);
+  const project = options.projectId
+    ? useProjectStore.getState().projects.find((item) => item.id === options.projectId)
+    : undefined;
+
+  const requestedSshHostId = project?.environment_type === "ssh"
+    ? project.ssh_host_id?.trim()
+    : options.sshHostId?.trim();
+  if (project?.environment_type === "ssh" && !requestedSshHostId) {
+    throw new Error("ssh_project_configuration_invalid");
+  }
+  if (requestedSshHostId) {
+    const sshHostId = requestedSshHostId;
+    const remotePath = project?.environment_type === "ssh"
+      ? project.remote_path.trim()
+      : options.cwd?.trim() || "/";
+    if (!sshHostId || !remotePath) throw new Error("ssh_project_configuration_invalid");
+
+    const sshStore = useSshHostStore.getState();
+    if (!sshStore.loaded) await sshStore.fetchHosts();
+    const hosts = useSshHostStore.getState().hosts;
+    const host = hosts.find((candidate) => candidate.id === sshHostId);
+    if (!host) throw new Error("ssh_host_not_found");
+    let resolvedStartupCmd = options.startupCmd === undefined && project?.environment_type === "ssh"
+      ? resolveProjectStartupCommand(project, { includeProviderOverrides: false })
+      : options.startupCmd?.trim() || undefined;
+    if (project && isDeepSeekTuiTool(project.cli_tool) && resolvedStartupCmd && !isDeepSeekTuiCommand(resolvedStartupCmd)) {
+      throw deepSeekLaunchError(new Error("deepseek_tui_profile_required"));
+    }
+    if (getDeepSeekTuiCommandSourceRoot(resolvedStartupCmd)) {
+      throw deepSeekLaunchError(new Error("deepseek_source_native_only"));
+    }
+    // SSH 启动由远端 bootstrap 执行，也必须隔离 Codex 的 Hook 环境。
+    resolvedStartupCmd = prepareStartupCommandForPty(resolvedStartupCmd, "bash");
+    const resolvedEnvironmentOverrides = { ...(options.envVars === undefined && project?.environment_type === "ssh"
+      ? parseProjectEnvVars(project) ?? {}
+      : options.envVars ?? {}) };
+    let persistedStartupCmd: string | undefined;
+    if (isDeepSeekTuiCommand(resolvedStartupCmd)) {
+      const nativeTuiLauncher = isDeepSeekTuiLauncherCommand(resolvedStartupCmd);
+      const preparedTui = prepareDeepSeekTuiCommand(resolvedStartupCmd!);
+      persistedStartupCmd = preparedTui.command;
+      resolvedStartupCmd = nativeTuiLauncher || preparedTui.resumeSessionId ? preparedTui.command
+        : clearDeepSeekTuiResumeBeforeStartup(preparedTui.command, "bash");
+      if (!nativeTuiLauncher || preparedTui.resumeSessionId) {
+        resolvedEnvironmentOverrides.DSH_TUI_RESUME_SESSION = preparedTui.resumeSessionId ?? "";
+      }
+      resolvedEnvironmentOverrides.NODE_ENV ??= "production";
+    }
+    const toolSource = project?.environment_type === "ssh"
+      ? resolveSshToolSource(project.cli_tool)
+      : null;
+    let agentInstallation: ReturnType<typeof useSshAgentIntegrationStore.getState>["installations"][number] | undefined;
+    let hookBridgeEnabled = false;
+    if (toolSource) {
+      const integrationStore = useSshAgentIntegrationStore.getState();
+      if (!integrationStore.loaded) await integrationStore.fetchAll();
+      const integrationState = useSshAgentIntegrationStore.getState();
+      agentInstallation = integrationState.installations.find(
+        (candidate) => candidate.host_id === host.id && candidate.status === "installed",
+      );
+      const hostConfiguredRoot = integrationState.preferences.find(
+        (preference) => preference.host_id === host.id && preference.source === toolSource,
+      )?.configured_root.trim();
+      const effectiveConfigRoot = project?.cli_config_root.trim() || hostConfiguredRoot || "";
+      if (effectiveConfigRoot) {
+        const environmentKey = {
+          claude: "CLAUDE_CONFIG_DIR",
+          codex: "CODEX_HOME",
+          kimi: "KIMI_CODE_HOME",
+          grok: "GROK_HOME",
+        }[toolSource];
+        resolvedEnvironmentOverrides[environmentKey] = effectiveConfigRoot;
+      }
+      const hookIntegration = integrationState.integrations.find((candidate) => (
+        candidate.host_id === host.id
+        && candidate.source === toolSource
+        && candidate.configured_root === effectiveConfigRoot
+        && candidate.cleanup_state === "active"
+      ));
+      const hookReport = hookIntegration
+        ? parseStoredSshHookReport(hookIntegration.hook_record_json)
+        : null;
+      hookBridgeEnabled = Boolean(
+        agentInstallation
+        && hookReport?.status === "installed"
+        && hookReport.installationId === agentInstallation.installation_id
+        && hookReport.remoteMachineId === agentInstallation.remote_machine_id,
+      );
+    }
+
+    return {
+      shell: null,
+      startupCmd: resolvedStartupCmd,
+      persistedStartupCmd,
+      startupHandledByLaunch: true,
+      environmentType: "ssh",
+      sshHostId: host.id,
+      remotePath,
+      providerSnapshot: null,
+      extensionSnapshotId: null,
+      invokeArgs: {
+        cwd: null,
+        envVars: null,
+        shell: null,
+        hookEnvEnabled: false,
+        claudeProvider: null,
+        codexProvider: null,
+        grokProvider: null,
+        terminalColors: getCurrentTerminalColors(),
+        sshLaunch: {
+          ...buildSshConnectionSpec(host, hosts),
+          hostId: host.id,
+          remotePath,
+          clientInstanceId: getSshClientInstanceId(),
+          projectId: project?.id ?? "",
+          projectName: project?.name.trim() ?? "",
+          bridgeEpoch: crypto.randomUUID(),
+          agentPath: hookBridgeEnabled ? agentInstallation?.install_path ?? "" : "",
+          agentInstallationId: hookBridgeEnabled ? agentInstallation?.installation_id ?? "" : "",
+          agentRemoteMachineId: hookBridgeEnabled ? agentInstallation?.remote_machine_id ?? "" : "",
+          toolSource: hookBridgeEnabled ? toolSource ?? "" : "",
+          environmentOverrides: resolvedEnvironmentOverrides,
+          initializationCommand: host.startup_script.trim() || null,
+          startupCommand: resolvedStartupCmd ?? null,
+        },
+      },
+    };
+  }
+
+  const resolvedShell = resolveShellForPty(options.shell, !!options.projectId, os);
+  const projectStartupCmd = project ? resolveProjectStartupCommand(project) : undefined;
+  // Internal project launchers historically passed the fully decorated command
+  // back here. Re-resolve that exact default without the legacy provider
+  // argument; the scoped provider snapshot owns the current provider config.
+  const usesProjectDefaultStartup = options.startupCmd == null
+    || (projectStartupCmd !== undefined
+      && options.startupCmd?.trim() === projectStartupCmd.trim());
+  let resolvedStartupCmd = usesProjectDefaultStartup && project
+    ? resolveProjectStartupCommand({ ...project, shell: isDeepSeekTuiTool(project.cli_tool)
+      ? resolvedShell ?? defaultShellForOs(os) : project.shell }, { includeProviderOverrides: false })
+    : options.startupCmd?.trim() || undefined;
+  if (project && isDeepSeekTuiTool(project.cli_tool) && resolvedStartupCmd && !isDeepSeekTuiCommand(resolvedStartupCmd)) {
+    throw deepSeekLaunchError(new Error("deepseek_tui_profile_required"));
+  }
+  const deepseekSource = getDeepSeekTuiCommandSourceRoot(resolvedStartupCmd);
+  if (deepseekSource) {
+    if (normalizeShellKey(resolvedShell) === "wsl") throw deepSeekLaunchError(new Error("deepseek_source_native_only"));
+  }
+  let preparedTui: ReturnType<typeof prepareDeepSeekTuiCommand> | null = null;
+  const nativeTuiLauncher = isDeepSeekTuiLauncherCommand(resolvedStartupCmd);
+  let deepseekPreload: { preloadUrl: string; cmdPreloadPath: string } | null = null;
+  let persistedStartupCmd: string | undefined;
+  if (isDeepSeekTuiCommand(resolvedStartupCmd)) {
+    try {
+      preparedTui = prepareDeepSeekTuiCommand(resolvedStartupCmd!);
+      resolvedStartupCmd = preparedTui.command;
+      persistedStartupCmd = preparedTui.command;
+      if (normalizeShellKey(resolvedShell) !== "wsl") {
+        if (nativeTuiLauncher) {
+          const info = await invoke<{ managerPatchPath?: string }>("deepseek_tui_preflight", {
+            sourceRoot: null,
+            envVars: options.envVars ?? null,
+          });
+          // Old manager overlays must not survive a saved command migration.
+          resolvedStartupCmd = info.managerPatchPath
+            ? stripDeepSeekTuiManagerPatch(resolvedStartupCmd, info.managerPatchPath)
+            : resolvedStartupCmd;
+          persistedStartupCmd = resolvedStartupCmd;
+        } else {
+          const prepared = await invoke<{ patchPath: string; preloadUrl: string; cmdPreloadPath: string }>("deepseek_tui_prepare_launch", {
+            sourceRoot: deepseekSource || null,
+            envVars: options.envVars ?? null,
+          });
+          persistedStartupCmd = stripDeepSeekTuiManagerPatch(resolvedStartupCmd, prepared.patchPath);
+          resolvedStartupCmd = withDeepSeekTuiPatch(persistedStartupCmd, prepared.patchPath, resolvedShell ?? defaultShellForOs(os));
+          deepseekPreload = prepared;
+        }
+      }
+    } catch (error) { throw deepSeekLaunchError(error); }
+  }
+  const providerSnapshot = await prepareProviderLaunchSnapshot(
+    project ?? null,
+    resolvedStartupCmd,
+    options.worktreeId,
+    options.providerSnapshot,
+    options.providerId,
+  );
+  const providerConfigs = buildNativeProviderLaunchConfigs(
+    providerSnapshot,
+  );
+  const extensionEnvironment = resolveExtensionEnvironment(project, options.cwd, resolvedShell, os);
+  const extensionCli = extensionCliForProject(project);
+  let extensionPlan: ProjectExtensionLaunchPlan | null = null;
+  let extensionPrepareWarning: string | undefined;
+  if (project && extensionCli && extensionEnvironment) {
+    try {
+      extensionPlan = await prepareProjectExtensionLaunch({
+        projectId: project.id,
+        worktreeId: options.worktreeId ?? null,
+        cli: extensionCli,
+        environmentKind: extensionEnvironment.environmentKind,
+        environmentId: extensionEnvironment.environmentId,
+        providerSnapshotId: providerSnapshot?.snapshotId ?? null,
+        providerId: providerSnapshot?.providerId ?? options.providerId ?? null,
+      });
+    } catch (err) {
+      extensionPrepareWarning = "extensions_project_launch_prepare_failed";
+      logWarn("project extension launch preparation failed; continuing with global launch", {
+        projectId: project.id,
+        worktreeId: options.worktreeId ?? null,
+        cli: extensionCli,
+        err,
+      });
+    }
+  } else if (project && extensionCli && project.environment_type !== "ssh") {
+    extensionPrepareWarning = "extensions_project_environment_unavailable";
+    logWarn("project extension launch skipped because the target environment is not identifiable", {
+      projectId: project.id,
+      cli: extensionCli,
+    });
+  }
+  let projectCodexOverridesApplied = false;
+  const projectCodexProfileName = extensionCli === "codex"
+    ? extensionPlan?.codexProfileName?.trim()
+    : undefined;
+  let providerStartupCmd = resolvedStartupCmd;
+  if (providerSnapshot?.appType === "codex") {
+    const projectCodexOverrides = extensionCli === "codex"
+      ? extensionPlan?.codexConfigOverrides ?? []
+      : [];
+    if (projectCodexProfileName && isDirectCodexStartupCommand(resolvedStartupCmd)) {
+      const profileCommand = withCodexProfile(resolvedStartupCmd, projectCodexProfileName);
+      if (profileCommand && profileCommand !== resolvedStartupCmd) {
+        providerStartupCmd = profileCommand;
+        projectCodexOverridesApplied = true;
+      }
+    }
+    if (
+      !projectCodexOverridesApplied
+      && projectCodexOverrides.length > 0
+    ) {
+      try {
+        // Keep the full provider profile even if the combined project profile
+        // was unavailable; routing-only legacy overrides lose provider options.
+        // WSL does not read profiles written into the Windows Codex Home.
+        const providerProfile = extensionEnvironment?.environmentKind === "local"
+          ? providerSnapshot.codexProfileName
+          : undefined;
+        const baseCommand = providerProfile
+          ? withCodexProfile(resolvedStartupCmd, providerProfile)
+          : resolvedStartupCmd;
+        const providerOverrides = providerProfile && baseCommand !== resolvedStartupCmd
+          ? []
+          : providerSnapshot.configOverrides;
+        const mergedCommand = withCodexConfigOverrides(
+          baseCommand,
+          [...providerOverrides, ...projectCodexOverrides],
+        );
+        if (mergedCommand) {
+          providerStartupCmd = mergedCommand;
+          projectCodexOverridesApplied = true;
+        }
+      } catch (err) {
+        logWarn("provider and project Codex overrides could not be merged", {
+          projectId: project?.id,
+          err,
+        });
+      }
+    }
+    if (!projectCodexOverridesApplied) {
+      providerStartupCmd = providerSnapshot.codexProfileName
+        ? withCodexProfile(resolvedStartupCmd, providerSnapshot.codexProfileName)
+        : withCodexConfigOverrides(resolvedStartupCmd, providerSnapshot.configOverrides);
+    }
+    if (!providerStartupCmd) {
+      releaseProviderSnapshot(providerSnapshot);
+      releaseProjectExtensionSnapshot(extensionPlan?.snapshotId);
+      throw new Error("provider_codex_command_unsupported");
+    }
+  } else if (providerSnapshot?.appType === "grokbuild") {
+    providerStartupCmd = withGrokModelOverride(
+      resolvedStartupCmd,
+      providerSnapshot.grokModel ?? "",
+    );
+    if (!providerStartupCmd) {
+      releaseProviderSnapshot(providerSnapshot);
+      releaseProjectExtensionSnapshot(extensionPlan?.snapshotId);
+      throw new Error("provider_grok_command_unsupported");
+    }
+  }
+  let startupCmd = prepareStartupCommandForPty(
+    providerStartupCmd,
+    normalizeShellKey(resolvedShell) ?? null,
+  );
+  let extensionSnapshotId = extensionPlan?.snapshotId ?? null;
+  let extensionMcpStatus = extensionPlan?.mcpStatus ?? "applied";
+  let extensionSkillStatus = extensionPlan?.skillStatus ?? "applied";
+  let extensionSnapshotUsed = projectCodexOverridesApplied;
+  const extensionWarnings = [
+    ...(extensionPlan?.warnings ?? []),
+    ...(extensionPrepareWarning ? [extensionPrepareWarning] : []),
+  ];
+  if ((providerSnapshot?.appType === "claude" || extensionCli === "claude") && CLAUDE_COMMAND_PATTERN.test(startupCmd ?? "")) {
+    startupCmd = withClaudeSettingsPath(
+      startupCmd,
+      extensionPlan?.claudeSettingsPath ?? providerSnapshot?.claudeSettingsPath ?? undefined,
+      normalizeShellKey(resolvedShell) ?? null,
+    );
+  }
+  if (extensionPlan && extensionCli === "claude" && CLAUDE_COMMAND_PATTERN.test(startupCmd ?? "")) {
+    if (extensionPlan.mcpConfigPath) {
+      const nextCommand = withClaudeMcpConfigPath(
+        startupCmd,
+        extensionPlan.mcpConfigPath,
+        normalizeShellKey(resolvedShell) ?? null,
+      );
+      if (nextCommand) {
+        startupCmd = nextCommand;
+        extensionSnapshotUsed = true;
+      } else {
+        extensionMcpStatus = "error";
+        extensionWarnings.push("extensions_project_claude_mcp_command_unsupported");
+      }
+    }
+    if (extensionPlan.claudeSettingsPath && /(^|\s)--settings(\s|$)/.test(startupCmd ?? "")) {
+      const settingsWasProjectPath = startupCmd?.includes(extensionPlan.claudeSettingsPath) ?? false;
+      if (!settingsWasProjectPath) {
+        extensionSkillStatus = "error";
+        extensionWarnings.push("extensions_project_claude_settings_command_unsupported");
+      } else {
+        extensionSnapshotUsed = true;
+      }
+    }
+  } else if (extensionPlan && extensionCli === "claude") {
+    if (extensionPlan.mcpConfigPath) {
+      extensionMcpStatus = "error";
+      extensionWarnings.push("extensions_project_claude_mcp_command_unsupported");
+    }
+    if (extensionPlan.claudeSettingsPath) {
+      extensionSkillStatus = "error";
+      extensionWarnings.push("extensions_project_claude_settings_command_unsupported");
+    }
+  }
+  if (
+    extensionPlan
+    && extensionCli === "codex"
+    && extensionPlan.codexConfigOverrides.length > 0
+    && !projectCodexOverridesApplied
+  ) {
+    try {
+      const profileCommand = projectCodexProfileName && isDirectCodexStartupCommand(startupCmd)
+        ? withCodexProfile(startupCmd, projectCodexProfileName)
+        : undefined;
+      const nextCommand = profileCommand && profileCommand !== startupCmd
+        ? profileCommand
+        : withCodexConfigOverrides(startupCmd, extensionPlan.codexConfigOverrides);
+      if (!nextCommand) {
+        extensionMcpStatus = extensionPlan.mcpStatus === "error" ? "error" : extensionMcpStatus;
+        extensionSkillStatus = extensionPlan.skillStatus === "error" ? "error" : extensionSkillStatus;
+        extensionWarnings.push("extensions_project_codex_command_unsupported");
+      } else {
+        startupCmd = nextCommand;
+        extensionSnapshotUsed = true;
+        projectCodexOverridesApplied = Boolean(profileCommand && profileCommand !== nextCommand);
+      }
+    } catch (err) {
+      extensionMcpStatus = "error";
+      extensionSkillStatus = "error";
+      extensionWarnings.push("extensions_project_codex_override_invalid");
+      logWarn("project extension Codex overrides were rejected", { projectId: project?.id, err });
+    }
+  }
+  if (extensionSnapshotId && !extensionSnapshotUsed) {
+    releaseProjectExtensionSnapshot(extensionSnapshotId);
+    extensionSnapshotId = null;
+  }
+
+  if (deepseekPreload && startupCmd) {
+    startupCmd = withDeepSeekTuiPreload(startupCmd, deepseekPreload.preloadUrl, deepseekPreload.cmdPreloadPath, resolvedShell ?? defaultShellForOs(os));
+  }
+  if (preparedTui && !nativeTuiLauncher && !preparedTui.resumeSessionId && startupCmd) {
+    startupCmd = clearDeepSeekTuiResumeBeforeStartup(startupCmd, resolvedShell ?? defaultShellForOs(os));
+  }
+  return {
+    shell: resolvedShell,
+    environmentType: os === "windows" && normalizeShellKey(resolvedShell) === "wsl" ? "wsl" : "local",
+    startupCmd,
+    persistedStartupCmd,
+    startupHandledByLaunch: false,
+    providerSnapshot,
+    extensionSnapshotId,
+    extensionPolicyRevision: extensionPlan?.policyRevision,
+    extensionStatus: extensionPlan || extensionPrepareWarning
+      ? extensionLaunchStatus(
+        extensionPrepareWarning ? "error" : extensionMcpStatus,
+        extensionPrepareWarning ? "error" : extensionSkillStatus,
+      )
+      : undefined,
+    extensionWarnings,
+    invokeArgs: {
+      cwd: options.cwd ?? null,
+      envVars: {
+        ...buildPtyEnvVars(options.envVars ?? null, resolvedShell),
+        ...(preparedTui ? {
+          ...(!nativeTuiLauncher || preparedTui.resumeSessionId ? {
+            DSH_TUI_RESUME_SESSION: preparedTui.resumeSessionId ?? "",
+          } : {}),
+          NODE_ENV: options.envVars?.NODE_ENV ?? "production",
+        } : {}),
+      },
+      shell: resolvedShell,
+      hookEnvEnabled: await shouldEnableHookEnv(),
+      claudeProvider: providerConfigs.claudeProvider,
+      codexProvider: providerConfigs.codexProvider,
+      grokProvider: providerConfigs.grokProvider,
+      terminalColors: getCurrentTerminalColors(),
+      sshLaunch: null,
+    },
+  };
+}
+
+export async function createDetachedPtyProcess(options: DetachedPtyLaunchOptions): Promise<DetachedPtyLaunchResult> {
+  const os = await getOsPlatform();
+  const launch = await resolvePtyLaunch(options, os);
+  let sessionId: string;
+  try {
+    sessionId = await terminalProcessManager.create(launch.invokeArgs);
+  } catch (error) {
+    releaseProviderSnapshot(launch.providerSnapshot);
+    releaseProjectExtensionSnapshot(launch.extensionSnapshotId);
+    throw error;
+  }
+
+  return {
+    sessionId,
+    shell: launch.shell,
+    startupCmd: launch.startupCmd,
+    providerSnapshot: launch.providerSnapshot ?? undefined,
+    extensionSnapshotId: launch.extensionSnapshotId ?? undefined,
+    extensionPolicyRevision: launch.extensionPolicyRevision,
+    extensionStatus: launch.extensionStatus,
+  };
+}

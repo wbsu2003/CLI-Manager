@@ -1,3 +1,206 @@
+# AI 架构治理与首批拆分验证（2026-09-07）
+
+- PR #252 已通过 GitHub CLI 合并：`78cd43ed08f78c641b61577cf36674d36e91b9d9`；修复 head 为 `361edeb146620a58c90c5089c471d0990e023052`，正常推送、未强推、未删除贡献者分支。
+- 当前重构分支 `refactor/ai-architecture`；治理脚本未绑定 build/dev，不新增依赖。
+- 架构边界测试 6 项通过；迁移检查无新增违规。首批拆分后超 2000 行文件从 25 个降至 23 个，基线已删除两个完成项；严格清零尚未完成。
+- 提取时逐项比较中英各 4472 个键值，CSS 1248 个顶层节点的内容与顺序完全一致；仅调整移动后的字体资源相对 URL。
+- 前端相关测试 72 项通过；`npx tsc --noEmit`、`npm run build` 通过。未启动桌面应用。
+- 人工待验：中英/繁体切换、深浅主题、背景图、普通/全屏/分屏终端、历史 Markdown、侧栏折叠；原 `FileEditorPane <= 300` 主线既有失败仍留待文件功能拆分处理。
+- 剩余工作：终端组件与 Store、其他前端领域、Rust 主程序/历史/服务、全目录 feature-first 收敛及最终严格检查。本阶段不宣称完整重构完成。
+
+---
+
+# PR #252 合并兼容与安全修复验证（2026-09-07）
+
+## 根因与发现清单
+
+- PR 分支基于旧 protocol `1.13`，把 Git history 占用了主线已经用于 SFTP download/delete 的 `1.14`；合并后统一为 Agent `0.1.14` / protocol `1.15`，保留 `fileGet`、`fileDelete` 并分别协商 `gitHistory`、`gitWorkspaceTools`。
+- 用量 Schema 的快速返回只检查少量表、视图、列和 marker，会把缺索引或旧视图误判为健康；现在验证全部必需对象和最终视图列，并可补齐索引、覆盖过期 marker。
+- Git rewrite 恢复引用原先只有秒级时间戳，重复操作可能覆盖恢复点；现在加入纳秒时间戳与原始提交前缀，并用 create-only `update-ref` 防止覆盖已有引用。
+- Git 引用收藏控件原先嵌套在按钮内，隐藏操作仅响应 hover，增强工具弹窗缺少 dialog/focus/Escape 契约；相关键盘和语义已补齐。
+
+## 验证结果
+
+- `npx tsc --noEmit`、`npm run build`：通过。
+- `cargo check --manifest-path src-tauri/Cargo.toml`：通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml usage_schema --lib`：6 项通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml ssh_agent_bridge --lib`：28 项通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml git_tools --lib`：3 项通过。
+- `cargo test --manifest-path src-tauri/ssh-agent/Cargo.toml --lib`：97 项通过。
+- 桌面 Rust 全量单元测试：1237 项通过、1 项忽略；扩展后的 Git rewrite 连续恢复点与脏工作区测试另外通过。
+- 使用已安装的 Node 22.23.2 执行 `scripts/git*.test.mjs`：71 项中 70 项通过；唯一失败为既有 `FileEditorPane.tsx <= 300` 静态长度断言，`origin/master` 同文件已有 424 个非空行，不是本 PR 引入。保留断言，纳入结构拆分阶段修复。
+- 默认 Node 20.19.0 不支持部分已有测试直接导入 TypeScript；使用本机 Node 22 复核，不新增依赖。
+
+## 未覆盖与测试边界
+
+- 未连接真实 SSH Host 执行 Git/SFTP 混合协议端到端测试；发送前 capability 检查、协议报告与 Agent 全量单元测试已覆盖。
+- 未在 Tauri 窗口手动切换中英文、键盘遍历弹窗及操作真实仓库；生产构建已验证前端类型和打包入口。
+- 增强工具复用项目的 Modal、确认和输入弹窗；补充读取 generation、写操作互斥与仓库上下文过期检查。仍需人工验证仓库切换期间的确认取消、Tab/Shift+Tab、Escape 和焦点恢复。
+
+---
+# 桌面 Web 后台失效卡顿修复（2026-09-09）
+
+## Web 终端关闭与桌面首帧重绘（后续增量）
+
+- Web `Workbench` 将现有 `closeTerminal/detach` 接入终端右上角关闭按钮；关闭只发送设备端 `detach`，不关闭桌面 PTY。
+- 桌面 `XTermTerminal` 在首次打开后的两个 animation frame 再执行 fit 与 viewport refresh，并在卸载时取消待执行帧，覆盖窗口恢复和初始 PTY 重连的首帧绘制边界。
+- 触点清单：`apps/web/src/App.tsx`、`views.tsx`、`styles.css`、`i18n.ts`；`src/components/XTermTerminal.tsx`；确认 Web 协议、PTY daemon、服务端路由和项目选择逻辑无需变化。
+
+- 根因：桌面 React 每 75ms 触发同步 Tauri 命令，命令在界面线程读取失效 Web daemon 发现信息并阻塞连接；实机失效端口 57658 连续三次失败耗时 2064/2034/2022ms。发现记录 PID 16816 已被 Lsf 复用，不能以 PID 存活认定后台正常。重装保留发现记录，因此重现。
+- 触点清单：`useWebDeviceBridge` / 新 `webBridgePolling`（调用频率与卸载）；`commands/web_device`（15 个命令的任务池边界、启动身份识别、原生直接调用）；`web_daemon`（TCP 期限、仅连接失败冷却、PID 身份）；`web_conversation`（4 个直接调用对接同步实现）。App 入口、webDevice.ts IPC 参数、PTY/Provider/数据库/认证协议确认不需更改。
+- 场景：未启用/未配对、在线、后台退出/失效端口、PID 复用、停服后设备断开、同端口/新身份重连、慢命令、卸载期间请求返回；窗口焦点/分屏/折叠/最小化不再决定原生网络执行线程，WSL/SSH/Worktree/Hook 不改变此回环边界。真实安装版按钮与长期输出仍需现场验证。
+- GitNexus 工具和 `.gitnexus` runner 不可用；按分诊闸机降级为 memory 刷新、契约、rg 与源码调用者检查。当前分支相对 origin/master 领先 20/落后 56，不同步、不提交、不覆盖其他既有改动。
+- 前端轮询新增 5 项测试已通过：离线 30 秒零高频 IPC、连接/停服/重连、100 次唤醒不重叠与卸载、错误/未配对、慢操作不阻塞终端。
+- Rust `cargo test --manifest-path src-tauri/Cargo.toml --lib web_ -- --test-threads=1`：47 通过、1 项既有本机 CLI 环境探测忽略。新增验证线程分离/错误保真、失效端口 100 次冷却快速返回、同端点恢复、新发现身份绕过冷却、实际 TCP 鉴权请求、PID 复用与进程消失。测试不修改真实发现信息。
+- `npx tsc --noEmit` 通过；Node 轮询/分片/stream/重连共 17 项通过；`git diff --check` 通过（仅既有 CRLF 提示）。memory 完成后刷新，3 个新增关键符号均可检索并与源码核对。
+- 初次 cargo check 因 PATH 缺 RC.EXE 失败；加入已安装 Windows SDK x64 路径后上述 Rust 测试编译成功。`npm run tauri:build:local -- --bundles nsis` 退出码 0，Release 22m14s，桌面与 Web 前端生产构建均通过。
+- 交付包：`src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_desktop-stall-fix_20260909_x64-setup.exe`，25,867,946 字节，SHA256 `FAFCE2FD73BA314C27877F1BD4BCD0A99458AAD090D2A1F8C3CE786D5A435FF3`。NSIS 脚本第 42/624/637–639 行确认打入本轮主程序、Web 静态资源及三个辅助程序；主程序写入时间 15:06:51，安装包 15:07:18。独立命名，不覆盖之前命名的重打包文件。
+- 安装：正常退出旧版（含托盘）后运行新包，不需要卸载或清空配置。仅失效发现文件已改名备份；其他真实配置、会话及配对数据未改动。未替用户安装；安装后按钮响应及长期使用仍需现场确认。回滚可使用保留的旧安装包，但旧包仍含同步轮询阻塞缺陷。
+- 等待打包期间，经权限批准，复核发现端口 57658 无监听、PID 16816 为 Lsf.exe 后，将真实失效 `C:/Users/lenovo/.cli-manager/web-daemon.json` 改名备份为同目录 `web-daemon.stale-20260909.json`。没有删除数据或终止任何用户进程；保留备份，不自动恢复这份已失效地址。临时操作效果仍待用户反馈。
+- 独立复核未发现本次修改引入的重大回归；终端输出仍经现有 publishQueue 串行。已知非本次触点：内嵌 HTTP 服务 `web_server_start/stop/restart` 仍有同步启动/退出等待，本次消除的是设备轮询反复阻塞，不代表所有原生服务生命周期都已异步化，也不代表旧 Web 渲染性能的未验收边界完成。
+
+# Web 终端性能及重新打包（2026-09-09）
+
+- 根因触点：useAppModel 的输出 state 导致 App/Workbench 随字节更新；WebTerminal 逐帧排队写入；bridge 重复 attach 强制完整 replay。已接入 terminalStream、动画帧合并、回放收集及可选 afterSequence 协议字段。
+- 上轮验证：Web/桌面 TypeScript 和生产构建通过；Web server 46 个单测及 4 个集成测试通过；桌面 web_ 41 项通过、1 项环境探测忽略；协议 7 项通过；stream/分片测试 7 项通过。
+- Chrome 隔离测试：1,000,025 字节回放及 10 次卸载/恢复通过；5,001 个同步突发小帧合并为 1 次 xterm.write，观察到 62ms 完成。这不是持续网络吞吐基准，也没有测量真实 Workbench render count 或重连中间帧像素。
+- 尚未覆盖：断网时原帧只到达部分分片、积压输出与增量 replay 重叠、多尺寸回放、后台持续输出及真实桌面/手机验收。性能任务保持 in_progress。
+- 当前用户另报桌面启动卡顿；采样显示 WebView2 GPU、renderer 和主程序占用，尚未证明根因。重新打包不代表此问题修复。
+- 已知检查限制：普通 Node 22 strip-only 无法运行 reconnect.test.mjs 引入的 parameter property；src-tauri cargo fmt --check 被本轮未改动的 provider/database.rs 格式差异阻止。GitNexus 不可用，已使用 memory 刷新、调用链和源码复核；相对 master 的差异包含大量既有分支变更。
+- 本次按用户要求重新构建现有 1.3.9 工作区，不更改用户安装目录或数据。产物和 SHA256 在构建完成后追加。
+- 重新打包时补验：`node --experimental-transform-types --test apps/web/src/reconnect.test.mjs` 5/5 通过；此前 strip-only 运行限制可用 Node 的 transform-types 选项解决，无需改业务代码。
+- 重新打包完成：`npm run tauri:build:local -- --bundles nsis` 退出码 0，Rust release 20m12s；产物 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_repack_20260909_x64-setup.exe`，25,833,968 字节，SHA256 `279CF7748FFC5384916D027EFF7EE6CC7134FDFDFDB1D2C84C4A275109B3F573`。NSIS 脚本确认包含新 Web `index-DKZdhkyd.js`、主程序及三个本轮编译的辅助程序。没有替用户安装或清理数据。
+
+# Web 停服端口残留与终端黑屏复核（2026-09-09）
+
+交付包：`src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_web-lifecycle_20260909_x64-setup.exe`，25,830,721 字节；SHA256 `85190FB79490C89A84F0B1DF6180C8D7C35F548C84159C5B2D358DDB7BD5D298`。`npm run tauri:build:local -- --bundles nsis` 成功，release 编译 23m59s，11:41 完成。NSIS 脚本确认主程序、三个新版辅助程序及 `index-NN_A9RLU.js` 入包；保留上次独立命名的 web-reconnect 包。安装前完整退出旧版，安装后网页 Ctrl+F5；本轮无数据迁移，回滚可安装保留的旧包（旧包仍有本次已修问题）。
+
+根因：安装版 `src-tauri/Cargo.lock` 使用 mio 1.1.1，Windows socket 可继承；启动 Web 服务后再生成辅助进程时，子进程保留 socket，主服务线程正常退出后端口仍占用。此前独立 Web 服务的测试使用 mio 1.2.2，已经含禁止继承修复，未覆盖安装版依赖。本次仅将桌面 mio 1.1.1 更新到 1.2.2，并修复启停并发与停止超时管理。终端边界另有单个超大帧不拆分的问题，已在桌面转发源头按字节分片。
+
+发现清单：桌面依赖锁定、WebServerManager/设置状态、终端 bridge/分片 helper、服务端输出校验、daemon/fallback 错误分级、WebTerminal/model/views；Provider、PTY 创建、认证规则及数据库 schema 不变。GitNexus 不可用；memory 刷新报告成功但新增分片符号仍查不到，以源码、依赖源码和实际测试为准。
+
+- Windows 根因先失败后通过：`cargo test --manifest-path src-tauri/Cargo.toml --test web_listener -- --nocapture --test-threads=1`。原依赖两项失败（继承标志 1；线程退出后同端口重绑 10048），更新后两项通过。十轮保留活跃隐藏辅助进程，交替服务先停/设备先断，包含不完整 HTTP 和 WebSocket；每轮原端口可重新绑定，监听、客户端、accepted socket 均不可继承。
+- 服务端 `cargo test --manifest-path apps/server/Cargo.toml --locked`：46 项单测、4 项真实 TCP/WS 集成通过。新增验证超限输出拒收后，同一认证设备连接继续收到心跳 ACK，正常输出继续到达同一认证浏览器。
+- 桌面 Web 相关测试：首次 40 通过/1 失败/1 忽略；失败为既有握手取消测试的两秒等待超时。同一个已编译测试程序单独复跑通过，完整复跑 41 通过/1 既有环境探测忽略，未放宽测试期限。保留这次时序敏感结果，不把首次失败抹去。
+- 浏览器/分片 JS：19 项通过，新增覆盖大于 600 KiB UTF-8/ANSI 字节完全一致、编码批次上限、原始 ACK 仅最终分片提交、密集元数据边界。桌面/Web TypeScript 和两端生产前端构建通过，Web JS 为 `index-NN_A9RLU.js`。
+- 真实 Chrome 渲染：`node scripts/webTerminalRenderer.smoke.mjs --run` 通过。直接挂载生产 WebTerminal 与分片 helper，1,000,025 字节 ANSI/中文/emoji 回放，首次和十次写入中断后切换/卸载重建均显示最终标记（11/11），errors=[]，xterm screen 984×608。截图已检查：`C:/Users/lenovo/AppData/Local/Temp/cli-manager-terminal-smoke-y8gKEB/terminal-smoke.png`。独立浏览器与测试服务已关闭。
+- 生命周期锁、启动就绪、停止超时管理和状态展示经独立只读复核，无阻塞问题。未替换用户正在使用的安装版、未重启真实 Provider 或终端；未在用户真实桌面设置页手动切换语言，新增中英文文案已同步且通过类型/生产构建检查。
+
+# Web 断线恢复验证（2026-09-09）
+
+安装包：`src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_web-reconnect_20260909_x64-setup.exe`，25,826,088 字节；SHA256 `B39AFABC5B965F9CDF4006262DD47D5D7EA98AECC2D65B01CCD581A99B6D2271`。`npm run tauri:build:local -- --bundles nsis` 成功，NSIS 脚本第 625/639 行确认最终 Web JS 与新版 Web daemon 入包。主程序及三个辅助程序均为本轮编译。先完整退出旧版，再安装新包并 Ctrl+F5 刷新网页；不需要删除配置、配对或项目数据。回滚可重新安装此前保留的安装包，本轮未新增数据库迁移。
+
+根因与发现清单：浏览器每条历史失效通知触发两次 HTTP 请求且连接依赖选择状态；服务停止没有取消独立 WebSocket 升级任务；设备握手先于超时设置且 Stop 无法关闭连接，旧代次仍能回写状态；旧 daemon 升级认证错误使用新版本号。修复触点为 apps/web 的 useAppModel/webClient/historyRefresh、apps/server 的 state/ws/lib、web-protocol heartbeat、src-tauri 的 web_daemon/commands/web_device。Provider 调用、PTY 进程和认证权限边界不做无关扩展。
+
+- 浏览器回归：15 项通过，含一万次失效通知合并、请求取消、握手失败、旧回调隔离、授权失败停止重试和心跳丢失恢复。
+- 服务端：45 项单测与 3 项真实 TCP/WebSocket 集成测试通过。覆盖升级后未发 hello 的连接、已配对设备同凭据同端口重启 3 次、认证浏览器从 0 回放一万条通知且保留会话正文，以及停服实际关闭 socket。
+- 桌面 Rust：`cargo test --manifest-path src-tauri/Cargo.toml --lib web_ -- --test-threads=1`，39 通过、1 项既有环境探测忽略。包含握手超时、Stop 中断后新代次连接、旧线程状态隔离和旧 1–4 版 daemon 升级认证。
+- 协议：7 项通过；Web 类型检查和生产构建、桌面打包前置 TypeScript/Vite 构建通过。最终 Web 资源为 index-n0V_X8iX.js，包含设备晚于浏览器上线时补发 attach 和过滤历史启动重放。
+- GitNexus 不可用；memory 刷新报告成功但新符号仍无结果，按可能过期处理，以实际源码、契约与上述测试为准。
+- 安装包版本沿用 1.3.9，CHANGELOG 使用 TEMP。未替换用户正在运行的安装版；实际虚拟组网、物理手机和真实 Provider 的长期交互尚未现场验证。此前 invalid terminal frame 的具体帧异常未被单独复现，不能把它宣称为已确认修复。
+
+# 桌面宠物渲染边界验证（2026-09-06）
+
+## 根因与发现清单
+
+- 根因位于桌宠原生窗口固定尺寸与 WebView 实际渲染边界之间：状态气泡可能通过 CSS 变换或内容布局超出 `190 × 210` 的可视区域，窗口自身的 `overflow: hidden` 随后裁剪气泡。
+- 修复落在 `DesktopPetApp` 的渲染测量与 Tauri 窗口 bounds 调整边界；新增纯函数 `calculateDesktopPetRenderedBounds` 负责 CSS 像素到物理像素、底部中心锚点、DPI 和工作区限制，菜单窗口仍复用既有几何计算。
+- `ResizeObserver` 在 DOM 更新后等待两帧再测量状态气泡和宠物舞台；原生调整期间不把程序化移动误记为用户拖动，窗口尺寸变化不会污染持久化位置。
+
+## 验证结果
+
+- `node --test scripts/desktopPetRenderedBounds.test.mjs`：6 项通过，覆盖顶部裁剪、水平超出、扩展稳定、缩回、DPI 缩放和工作区边界。
+- `npx tsc --noEmit`：通过。
+- `git diff --check`：通过（仅保留仓库既有 LF/CRLF 转换提示）。
+
+## 未覆盖与测试边界
+
+- 尚未在 Windows Tauri 实机上对多显示器、125%/150% DPI、屏幕顶部停靠和菜单开关组合做端到端手测；生产构建与 NSIS 打包需在本次交付中继续验证。
+- Rust 窗口 bounds 命令契约未改变；需要在打包后确认透明无边框窗口的 outer size 与 WebView CSS viewport 在目标 Windows 版本上保持一致。
+
+---
+
+# JetBrains 风格 Git 工作区验证（2026-09-04）
+
+## Git 工作区底部工具窗口与目录树（2026-09-04）
+
+### 根因与发现清单
+
+- 原 Git 工作区替换整个终端区域，导致视觉上从左侧展开；本次仅调整前端布局，将其放入终端容器底部 Dock，终端 PTY、分屏和 Workspan 保持挂载。
+- 原提交详情按路径扁平渲染，无法表达模块目录层级；新增目录树构建与展开状态，文件点击仍复用只读 Diff Viewer。
+
+### 验证结果
+
+- `npx tsc --noEmit`、`npm run build`：通过。
+- `node --test scripts/gitGraphLayout.test.mjs scripts/gitWorkspace.test.mjs`：通过。
+- 未改变 Git Transport、IPC、Rust/SSH Agent 或写操作契约；底部面板真实 Tauri 窗口的拖拽手测仍需在本地完成。
+
+## 实现与影响面
+
+- 项目侧栏底部新增 Git 工作区入口；标准模式在终端容器上方挂载全屏工作区，紧凑模式点击入口时先恢复标准模式。关闭工作区只切换可见性，不卸载 PTY、分屏树或 Workspan。
+- 工作区通过现有 `useGitTransportLease` 读取本地、WSL 与 SSH Git，上层保留每批 50 条 cursor；提交表格使用虚拟列表连续加载，纯前端 DAG lane 算法覆盖线性、分叉、merge、根提交、跨页延续和搜索缺失父提交。
+- 左侧引用树展示当前分支、本地分支、按 remote 分组的远程分支与已加载标签，并支持引用筛选；仓库和搜索切换均使用独立 generation 丢弃迟到结果，SSH 根仓库空字符串 ID 保持合法。
+- 右侧提交详情按需读取文件，继续复用共享 `DiffViewerModal` 且不传入任何回滚/暂存 mutation；“变更”标签复用原 `GitChangesPanel` 与 Git Store，不复制写操作链。
+- codebase-memory 已用 `moderate` 模式重建索引；索引确认 Git 工作区触达 `TerminalTabs`、`SidebarFooter`、Git Transport Lease、变更面板和共享 Diff Viewer，属于 HIGH/CRITICAL UI 主流程，因此通过静态架构测试、类型检查、定向 Rust 测试和生产构建复核。
+
+## 验证结果
+
+- `node --test scripts/gitGraphLayout.test.mjs scripts/gitWorkspace.test.mjs scripts/gitHistory.test.mjs scripts/gitDiffViewerArchitecture.test.mjs scripts/gitTransportLease.test.mjs`：20 项通过。
+- `npx tsc --noEmit`：通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml git_history --lib`：10 项通过。
+- `cargo test --manifest-path src-tauri/ssh-agent/Cargo.toml git_history --lib`：2 项通过。
+- `cargo check --manifest-path src-tauri/Cargo.toml`：通过。
+- `npm run build`：通过。
+- `git diff --check`：通过，仅提示工作区现有的 LF/CRLF 自动转换策略。
+
+## 未覆盖与测试边界
+
+- 浏览器 Vite 页面无法脱离 Tauri runtime 完成应用启动（bootstrap 读取 Tauri metadata 失败），因此未在纯浏览器中伪造项目数据做截图；需要在 Tauri 窗口中手动确认中英文切换、真实仓库拓扑和窄窗口横向滚动。
+- 本次未改变 Rust/SSH wire contract、Git 写操作、Diff 大小限制或凭证策略；未连接真实 SSH Host 执行端到端 Git 浏览。
+
+---
+
+# Grok TUI 鼠标点击恢复验证（2026-08-25）
+
+## 根因与发现清单
+
+- 根因位于宿主 xterm 鼠标策略：PR #212 将 `createTerminalMouseInteractionOptions` 的 `mouseEventsRequireAlt` 设为 `true`，TUI 开启鼠标协议后普通 click/drag/move 被宿主丢弃，Grok plan / 子 agent 点击无反应（#228）。
+- 修复落在同一常量，改回 `false`，使 TUI 直接接收未修饰鼠标报告；Shift 仍用于宿主选区。OSC 52 剪贴板路径不改。
+- 触点：`src/terminal/browser/TerminalMouseInteraction.ts`、`scripts/terminalMouseInteraction.test.mjs`、`src/components/XTermTerminal.tsx`（仅 spread 该 options，未改）。
+- 确认无关：`useTerminalOsc` / OSC 52 解析与写剪贴板、`Ctrl+Shift+C`、设置页开关。
+- 场景：本地 / WSL / SSH；Grok 及其他启用鼠标协议的 TUI；未开鼠标协议的普通 Shell 仍是宿主选区。
+
+## 验证结果
+
+- `node --test scripts/terminalMouseInteraction.test.mjs`：2 项通过。
+- `npx tsc --noEmit`、`git diff --check`：通过。
+- 未在 Windows Tauri 窗口对 Grok 做端到端手测。
+
+---
+
+# OSC 52 本机剪贴板验证（2026-08-17）
+
+## 根因与发现清单
+
+- 根因位于宿主终端 OSC / 鼠标边界：PTY 已转发 OSC 52，前端只处理颜色查询，不写入 Tauri 剪贴板。远端 GUI/`xclip` 写不到 Windows。修复落在 `terminalOscParse` + `useTerminalOsc` + `useTerminalDisplay` + `XTermTerminal`。
+- 触点：`src/lib/terminalOscParse.ts`、`src/hooks/useTerminalOsc.ts`、`src/hooks/useTerminalDisplay.ts`、`src/components/XTermTerminal.tsx`、`src/App.tsx`、`src/terminal/browser/TerminalMouseInteraction.ts`、`src/stores/settingsStore.ts`、`src/lib/syncSettings.ts`、`src/lib/i18n.ts`、`ShortcutSettingsPage.tsx`、`.trellis/spec/backend/terminal-osc-color-contracts.md`。
+- 确认无关：Rust `osc_color.rs` 仍放过非 10/11 OSC；`systemClipboard.ts` 复用；不改 PTY ACK / daemon 分帧。
+- 场景：live 写剪贴板；replay/reset 不写；query 回包；设置关闭；普通拖选 vs Alt 交给 TUI；`Ctrl+Shift+C` 阻止检查元素。
+
+## 验证结果
+
+- `node --test scripts/terminalOsc52.test.mjs scripts/terminalOsc.test.mjs scripts/terminalMouseInteraction.test.mjs`：26 项通过。
+- `DISPLAY=:11 bash scripts/terminalOsc52.clipboard.e2e.sh`：live / tmux / replay 三项本机 X11 剪贴板 e2e 通过。
+- `npx tsc --noEmit`、`git diff --check`：通过。
+- 未在 Windows Tauri 窗口对 Grok 做端到端手测。
+
+## 未覆盖
+
+- Tauri `clipboard-manager` 插件路径依赖桌面 WebView；此处用同一 hook + 本机 `xclip` 验证解码与写剪贴板语义。
+- Chromium 检查元素在部分 WebView 版本仍可能有独立绑定，需在 `tauri dev` 下确认 `preventDefault` 生效。
+
+---
+
 # SSH NVM Codex 启动环境修复验证（2026-07-28）
 
 ## 根因与发现清单
@@ -904,3 +1107,228 @@
 - `node --test scripts/desktopPetSize.test.mjs scripts/desktopPetMenuGeometry.test.mjs scripts/desktopPetTransport.test.mjs scripts/desktopPetStatus.test.mjs`：25 项通过。
 - `npx tsc --noEmit`、`npm run build`、`cargo check`、`cargo fmt -- --check`、`git diff --check`：通过。
 - 当前机器未复现 Issue #196 用户的 WebView2/显示器状态；最终仍需由受影响 Windows 11 机器验证内置小猫和 Codex Pets 在原尺寸设置下的气泡完整性。
+
+## Codex app-server Provider Profile 回归修复（2026-08-14）
+
+### 根因与发现清单
+
+- 根因位于 CLI-Manager 原生 Codex 代理的命令参数边界：提交 `b84a7d68` 为锁定登记 Provider，在公共参数构造器中重新加入 `--profile`；该构造器同时服务 app-server 和普通运行命令，而 Codex 0.147.0 明确禁止 app-server 使用 `--profile`，导致 cc-connect 启动探针以退出码 1 结束。
+- 修改 `src-tauri/src/codex_app_server_proxy.rs`：参数构造按命令类型区分；app-server 只接收完整的 `model_provider`、Provider name、base URL、env key、wire API、模型目录及可选模型 `-c` 覆盖，普通运行命令继续加载生成的 Provider profile。
+- 修改 `src-tauri/src/commands/cc_connect.rs`：删除只为 app-server strict probe 镜像 Provider profile 的失效逻辑；真实 `CODEX_HOME`、登记 Provider 环境、模型目录和密钥脱敏保持不变。
+- 修改 `scripts/codexAppServerProxy.e2e.test.mjs`：锁定 app-server 不得出现 `--profile`，同时保留普通命令必须携带 profile 的断言。
+- 已复核但未修改：微信、Telegram、飞书、企业微信的平台配置与授权、cc-connect 源码及安装、SSH Codex 直连、会话 ID/cwd/Provider 校验、用户消息透传和文件投递上下文。
+- GitNexus 与 codebase-memory MCP 当前未暴露；已按降级规则使用修复契约、`rg`、Git 历史和源码调用点完成影响分析。该启动边界影响全部本地 Codex 远程平台，风险为 HIGH。
+
+### 验证结果
+
+- 本机 Codex CLI 0.147.0：旧参数稳定复现 `--profile only applies to runtime commands`；去掉 profile、保留相同完整 `-c` Provider 覆盖后，`app-server --strict-config --listen stdio://` 正常启动并以 0 退出。
+- 新编译的 Windows `cli-manager-codex-proxy.exe` 使用隔离 `CODEX_HOME`、受管 Provider name 和完整覆盖启动真实 Codex app-server 成功；未发起模型请求。
+- `cargo test codex_app_server_proxy::tests --lib`：21 项通过。
+- `cargo test commands::cc_connect::tests --lib`：48 项通过。
+- `node scripts/codexAppServerProxy.e2e.test.mjs`：4 项通过，使用真实 Windows 原生代理二进制。
+
+## cc-connect Codex 子进程 Provider 密钥转发修复（2026-08-14）
+
+### 根因与发现清单
+
+- 根因位于 CLI-Manager 受管进程环境与 cc-connect Agent 子进程环境的边界：CLI-Manager 只把登记 Provider 的动态密钥变量注入 cc-connect 父进程，却没有写入 `[projects.agent.options.env]`；cc-connect app-server 恢复线程后能选中正确 Provider，但模型请求阶段的 Codex 子进程缺少该变量，因此远程平台持续显示输入中并报 `Missing environment variable`。
+- 日志确认平台消息已接收、Codex app-server 已启动且原 `cliSessionId` 已恢复；项目仍解析到登记 Provider，失败变量名也与该 Provider ID 的派生变量一致，排除了平台凭据、代理、工作目录、Session ID 和 Provider 选择错误。
+- 修改 `build_managed_config_with_codex`：把 Provider 动态变量通过 `${VAR_NAME}` 占位符显式加入 Agent 环境；真实密钥仍只存在于受管进程环境，不写入 `config.toml`、日志或命令行。微信、Telegram、飞书和企业微信复用同一 Codex Agent 配置，因此同时覆盖。
+- 已复核但未修改 app-server 代理参数、`thread/resume` 校验、Provider 数据库/密钥存储、SSH 托管和 cc-connect 源码。
+- GitNexus 与 codebase-memory MCP 当前未暴露；已降级使用 Provider 契约、`rg`、生成配置、运行日志与源码调用点完成影响分析。变更只影响本地 Codex 受管配置生成，风险为中等。
+
+### 验证结果
+
+- `cargo test managed_codex_config_forwards_provider_key_without_persisting_secret`：通过，断言配置包含动态变量占位符且不包含 Provider 密钥、地址或名称。
+- 使用本机 cc-connect `v1.5.0-beta.3` 执行 `managed_config_matches_installed_cc_connect_when_requested`：通过，生成配置可被已安装版本解析和格式化。
+- `cargo test commands::cc_connect::tests --lib`：48 项通过。
+- `cargo fmt --all -- --check`、`git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+- 用户已完成真实远程托管消息冒烟，确认问题解决。
+
+## 大型用量数据库首次升级启动修复（2026-08-14）
+
+### 根因与发现清单
+
+- 根因位于前端启动监控与 SQL 迁移的异步边界：上游迁移 27 会把旧 `request_logs` 全量写入 `usage_records`；当前环境有 1,398,185 条记录、主数据库约 1.2 GB，迁移超过固定 15 秒后仍在正常执行，但前端把“耗时较长”错误转换为 `startup_timeout:stores`，重试会重新加载 WebView 并中断迁移。
+- 修改 `src/App.tsx`：15 秒阈值只切换为长时间加载提示，不再制造伪启动错误；真实 rejected promise 仍由既有初始化错误页处理。会话 Store 与主数据库拆为独立启动阶段，便于界面和日志准确定位。
+- 修改 `src/lib/i18n.ts`：补齐中文和英文的会话恢复、数据库升级及长时间初始化提示。
+- 新增 `scripts/appStartupLongMigration.test.mjs`：锁定长迁移不得进入失败页、数据库阶段和双语提示必须接入真实启动界面。
+- 已确认未修改 SQLx 迁移 25～29 的版本、SQL 或校验和，未删除、裁剪或重写用户用量记录；项目加载、同步功能、会话恢复及真实启动异常处理保持原流程。
+- GitNexus 工具当前未暴露；codebase-memory 对 `runStartupStage` 的影响分析覆盖全局 `App` 启动链路并判定为 CRITICAL，已结合启动日志、SQLite 迁移表、源码和 Git diff 复核。
+
+### 验证结果
+
+- `node scripts/appStartupLongMigration.test.mjs`：2 项通过。
+- `npx tsc --noEmit`：通过。
+- `npm run build`：通过，完成 6822 个模块转换。
+- `git diff --check`：通过，仅有仓库现有 Windows 行尾提示。
+- 未在用户正在使用的 1.2 GB 数据库上启动新包，以免关闭或干扰现有 CLI-Manager；安装包首次运行仍需等待一次性迁移完成，后续启动不再重复迁移。
+
+## 百万级项目路径迁移后台化（2026-08-21）
+
+### 根因与发现清单
+
+- 根因位于 SQLx 启动迁移与历史用量维护边界：migration 32 对 `usage_records` 执行全表关联和相关更新，并要求一个启动事务完成；现场数据库约 3.3 GB，`usage_records` / `request_logs` 各约 164 万行，启动日志在 database 阶段等待超过 26 分钟仍未提交。
+- `src-tauri/src/commands/db_repair.rs` 在数据库插件加载前仅为有历史行、已有 `project_path` Schema 且尚未应用 v32 的旧库登记原 v32 description/checksum；空库、缺 Schema 和已应用 v32 均保持标准 SQLx 行为。
+- 同文件新增单飞后台回填：先构造唯一项目路径映射和临时 rowid 队列，再按 2,000 行短事务更新；route 路径按相同 source/session 从最新 session_log 继承。既有非空路径、重名项目和 SSH 项目不会被覆盖或猜测。
+- `src/lib/db.ts` 在 `Database.load` 成功后非阻塞触发真实后台入口；`src-tauri/src/lib.rs` 注册命令。请求日志读取对空路径已有 bounded legacy project-key 兼容，因此回填期间仍可使用。
+- 原 `MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_SQL`、版本 32、视图和 checksum 未修改；统计口径、历史解析、Provider、远程托管与桌宠确认无关。
+- GitNexus 未暴露且本地 `npx` 因缓存权限不可用；按 app-startup/history-stats 契约、`rg`、源码调用链、SQLite 现场数据和 Git diff 降级。变更触达 `getDb` 后全部 SQLite 消费者，风险 HIGH。
+
+### 验证结果
+
+- `cargo test --manifest-path src-tauri/Cargo.toml db_repair --lib`：15 项通过；新增覆盖原 checksum 登记、空库/缺 Schema no-op、唯一/歧义映射、50,005 行跨批次回填、route 继承、已有路径保护及重复运行幂等。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`node_modules/.bin/tsc --noEmit`、`git diff --check`：通过。
+- `npm run tauri:build:local -- --bundles nsis`：通过，复用 npm/Cargo 缓存，仅生成 `CLI-Manager_1.3.7_x64-setup.exe`；SHA256 `002700BBD64E9579DC8A12DC1FE17011D0099EFBAFA6C2D8FA80584877FE46B8`。
+- GitNexus `detect-changes` 无法执行：当前会话未暴露 MCP，本地无 CLI，`npx --offline` 也没有缓存包；已用契约、源码调用链、聚焦测试和最终 Git diff 完成降级范围复核。
+- 打包前未主动操作仍由已安装 CLI-Manager 使用的 3.3 GB 真实数据库，避免干扰当前会话；现场诊断阶段只执行只读 Schema、迁移状态、行数和日志检查。
+- 用户使用 NSIS 升级包对原 3.3 GB / 164 万行数据库完成真实升级启动冒烟，确认应用不再阻塞于 migration 32，测试通过。
+
+## 微信授权 Profile 隔离修复（2026-08-24）
+
+### 根因与发现清单
+
+- 根因位于微信授权专用配置与常规 cc-connect Profile 校验边界：`start_weixin_authorization` 在启动 setup 子进程前调用 `normalize_profile`，会校验所有已启用平台；任一 Telegram、飞书或企业微信草稿的 `allow_from` 为空都会提前返回 `allow_from must contain at least one explicit user ID`。
+- 新增 `prepare_weixin_authorization_platforms`：微信强制进入授权占位状态，旧微信 allowlist 无效时允许重新扫码；其他启用但 allowlist 无效的平台仅改为禁用并保留字段，配置有效的平台保持启用。随后仍复用严格 `normalize_profile` 校验公共字段，扫码完成后继续通过原 `parse_weixin_authorization_result` 强制 token 与 `@im.wechat` ID。
+- 常规保存/启动、代理、二进制检测、凭据存储、授权 TOML 协议和 cc-connect 源码均未放宽或修改；前端仍使用原 IPC 和错误展示。
+- GitNexus MCP/CLI 不可用且离线 npm 无缓存，已通过 cc-switch 契约、`rg`、源码、Git blame 和聚焦测试降级复核；影响仅限微信授权 Profile 准备及其结果保存，风险中等。
+
+### 验证结果
+
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::cc_connect::tests:: --lib`：59 项通过；新增覆盖无效其他平台草稿隔离、有效平台保留、无效旧微信 ID 重授权和常规严格校验。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`node_modules/.bin/tsc --noEmit`、`git diff --check`：通过。
+- Trellis context 校验通过。GitNexus `detect-changes` 因当前会话未暴露 MCP、本机无缓存 CLI 而无法运行；已使用契约、调用点、全部 cc-connect 单元测试和最终 diff 降级复核。
+
+## Windows Codex 空格路径启动修复（2026-08-24）
+
+### 根因与发现清单
+
+- 根因位于 CLI-Manager 原生 Codex 代理与 Windows CMD 脚本启动器边界：`.cmd/.bat` 原先通过 `cmd.exe /d /c <launcher> ...` 传递，`\\?\D:\code path\...` 会被 CMD 截断为第一个空格前的命令，导致 app-server proxy probe 退出 1。该问题与 cc-connect 路径配置、Provider、平台凭据和网络无关。
+- `codex_app_server_proxy::codex_command` 现在对 shell 脚本移除本地盘/UNC verbatim 前缀，`.cmd/.bat` 使用固定 `cmd /d /s /c call` 入口；`.ps1` 保持结构化 `powershell -File`，`.exe` 保持直接启动。已有命令拼接元字符拒绝扩展到 CR/LF，合法带双引号的 Codex `-c` Provider 配置继续支持。
+- `cc_connect::output_text` 复用 `text_encoding::decode_text` 的 UTF-8 快路径与 legacy 编码探测，GBK 中文“系统找不到指定的路径”不再显示乱码；无法识别才 lossy 回退。
+- 真实代理 E2E 将 fake Codex `.cmd` 放入含空格与中文的目录，并以 `\\?\` 路径传入，覆盖 app-server、普通透传、Provider 参数、stdin/stdout、密钥不泄漏与退出码。
+- GitNexus MCP/CLI 未暴露且离线 npm 无缓存，已通过 cc-switch 契约、`rg`、调用链、Rust 单测和真实代理 E2E 降级复核。`codex_command` 影响所有本地 Codex 远程托管，风险 HIGH。
+
+### 验证结果
+
+- `cargo test --manifest-path src-tauri/Cargo.toml codex_app_server_proxy::tests --lib`：24 项通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml process_output_decodes_utf8_and_gbk_diagnostics --lib`：1 项通过。
+- `node scripts/codexAppServerProxy.e2e.test.mjs`：4 项通过，真实 Windows 代理二进制从 verbatim + 空格 + 中文目录启动 `.cmd`。
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::cc_connect::tests:: --lib`：60 项通过，包含此前微信授权隔离回归。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`node_modules/.bin/tsc --noEmit`、`git diff --check`：通过。
+- Trellis context 校验通过。GitNexus `detect-changes` 因 MCP/本机离线 CLI 不可用而降级，最终范围使用契约、调用链、Rust 全套 cc-connect 测试与真实代理 E2E 复核。
+- `npm run tauri:build:local -- --bundles nsis`：通过，仅生成 NSIS 安装包；SHA256 `CF929410CA2C602DB43927D33C23B1D77F52EF5104A422518F40F3AD278C0429`。
+
+## Git 提交历史（2026-09-04）
+
+### 实现与边界
+
+- Git 面板新增“变更 / 历史”只读视图，按 50 条分页展示并支持提交标题、作者、邮箱和完整 SHA 搜索；提交默认收起且可再次点击折叠，详情与文件 Diff 均按需加载。历史 Diff 使用稳定加载器，父级 Git 状态刷新不会清空并重复请求当前 Diff。
+- 本地使用 libgit2，WSL/SSH 使用固定 argv 的 Git CLI；Merge 提交与第一父提交比较，根提交与空树比较，重命名 Diff 同时校验并传递新旧路径。
+- SSH Agent 升级为 `0.1.13` / protocol `1.14`，通过 `gitHistory` capability 协商；旧 Agent 在请求帧写入前被拒绝。
+- GitNexus MCP 未暴露，使用 codebase-memory moderate 索引、调用链影响分析与 `detect_changes`，并以源码、测试和最终 Git diff 复核。共享 Git Transport/SSH bridge 影响为 HIGH/CRITICAL，因此实现仅新增只读方法，未改已有 Git mutation 语义。
+
+### 验证结果
+
+- `npm run build`、`npx tsc --noEmit`：通过。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、`cargo check --manifest-path src-tauri/ssh-agent/Cargo.toml`：通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml git_history -- --nocapture`：10 项通过，覆盖空仓库、51+ 分页、搜索、Merge 第一父提交、重命名、新旧路径 Diff、二进制文件、OID/WSL 结构化解析和旧 Agent capability 拒绝。
+- `cargo test --manifest-path src-tauri/ssh-agent/Cargo.toml --lib`：92 项通过。
+- `node --test scripts/gitHistory.test.mjs scripts/gitStoreRemote.test.mjs scripts/gitDiffViewerArchitecture.test.mjs`：16 项通过，新增默认收起/点击切换与稳定 Diff 加载器回归检查。
+- Desktop 与 SSH Agent `cargo fmt --check`、`git diff --check`：通过。
+- 当前 Windows 环境无法枚举 WSL distro（`Wsl/EnumerateDistros/Service/E_ACCESSDENIED`），因此 WSL Linux 文件系统和真实 SSH 主机交互未做本机人工冒烟；相关固定 argv、解析、能力协商和路径校验由自动测试与编译覆盖。
+## Web 真实 PTY 终端交付（22:39）
+
+根因陈述：问题位于 Web 展示层与桌面 PTY 的跨边界设计，旧主流程消费结构化 conversation 事件并渲染聊天卡片，不能保证呈现 CLI 的原始 TUI 输出；连接故障另位于内嵌服务启动就绪边界，线程创建即报告 running 且 bind 前已触碰存储。修复落在真实 PTY 传输协议、桌面 bridge、浏览器 xterm 和服务生命周期源头，不在卡片组件或浏览器重试处增加兜底。
+
+发现清单：
+
+- crates/web-protocol、apps/server/src/ws.rs：新增并验证 terminal attach/detach/input/resize/output/status 帧；设备归属、移动 scope、Session ID、输入大小和 resize 范围已覆盖。
+- src-tauri/src/web_daemon.rs、commands/web_device.rs：daemon 与非 daemon 兼容路径均接入有界终端命令队列，local daemon 协议升至 3，旧 1/2 协议升级可回收。
+- src/hooks/useWebDeviceBridge.ts：复用现有 TerminalProcessManager / PtyHostSocket，16ms 合并输出，PTY replay reset 转为 xterm reset；不创建第二套 CLI 进程。
+- apps/web/src/WebTerminal.tsx、views.tsx、useAppModel.ts：主工作区替换为 xterm，按项目启动结果中的 PTY ID attach，输入/resize 双向转发；项目、设备、主机页和登录状态切换时 detach。
+- apps/server/src/lib.rs、commands/web_server.rs：先 bind 再打开存储和更新设备状态，完整初始化后才置 running，失败/20 秒未就绪会回收线程。
+- 历史会话、文件/Git 管理、Provider、主数据库 usage schema：确认不属于真实终端数据面，本轮不扩展修改；既有结构化会话数据仍可保留，但不再由 Web 主界面自动导入或渲染。
+
+验证结果：
+
+- npm run web:typecheck、npm run web:build、npm run build：通过。
+- cargo test --manifest-path crates/web-protocol/Cargo.toml：7/7 通过，含终端帧 serde round-trip。
+- cargo test --manifest-path apps/server/Cargo.toml：45/45 通过，含终端 scope/边界及 bind 失败无数据库副作用。
+- cargo check --manifest-path src-tauri/Cargo.toml：通过；cargo test --manifest-path src-tauri/Cargo.toml --lib web_ 初跑 30/31 通过、1 项环境测试忽略，唯一失败为测试写死 local daemon 旧版本 2；改为跟随 PROTOCOL_VERSION 后聚焦复测通过。
+- node apps/web/src/conversation.test.mjs：10/10 通过；git diff --check 无 whitespace error，仅有仓库现有 CRLF 提示。
+- codebase-memory moderate 索引已刷新；detect_changes(compare master) 因当前长期功能分支相对 master 包含大量既有变化而输出噪声，未报告额外 impacted symbols，最终范围继续以本轮触点 diff、契约和上述构建/测试界定。
+
+交付边界：自动化已覆盖协议、认证范围、服务生命周期、类型和构建；没有替用户安装新包，因此尚未在物理手机和当前真实 Provider 上执行新安装版的键入、Ctrl+C、审批、刷新重连与桌面/Web 同屏人工验收。当前实现交付单个活动 Web 终端；多 PTY 标签列表和多端输入/resize 控制权仲裁留作后续增强。
+
+打包结果：src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_x64-setup.exe，25,819,538 字节，2026-09-08 23:05:07，SHA-256 340503EFC01BFE14D1BFB026B859E6CF62D5D239712C3324DD981CD765B5210C。NSIS installer.nsi 第 637-639 行确认包含 codex proxy、PTY daemon 和 Web daemon；主程序及三个后台 release 二进制均为本轮新编译产物。最终重打包已包含异步项目启动防串上下文与防重复提交检查，打包命令退出码 0。
+
+## Web 终端双端隔离与网卡监听（2026-09-09）
+
+### 根因与发现清单
+
+- 桌面终端空白、灰块和 TUI 错乱的根因位于 PTY 多观察端边界：Web attach 原先复用桌面全局 `PtyHostSocket`，全量 replay/reset 会同时进入桌面 xterm；桌面与 Web 还会按各自 viewport 反复 resize 同一个 ConPTY。
+- Web bridge 现在为每个 Web 终端建立独立 observer 连接，replay、ACK、监听和断开均与桌面连接隔离；detach 只释放 observer，不关闭真实 PTY。输出批次保留逐帧 sequence、尺寸、reset/replay 类型和 replay 结束标记，并串行发布有界批次。
+- PTY 尺寸采用单一所有权：桌面存在活动输出 consumer 时由桌面控制，Web 只按真实帧尺寸镜像；桌面没有 consumer 时 Web 取得 resize 权限。浏览器 xterm 按帧顺序等待 write callback，再执行后续 reset/resize/write，避免异步解析越序。
+- 内嵌 Web 服务监听地址从固定回环扩展为用户可配置的本机网卡 IP，也支持显式 `0.0.0.0` / `::`。具体非回环地址必须属于本机；所有网卡监听必须配置精确 Origin。运行中保存会重启服务，若新监听失败则恢复旧配置与旧监听。
+- HTTP 局域网或虚拟组网访问可以工作，但传输安全依赖组网；HTTPS Origin 自动使用 Secure Cookie。设置页补齐中英文地址、Origin 和网络暴露提示。
+
+### 验证结果
+
+- `npm run web:typecheck`、`npx tsc --noEmit`、`npm run web:build`、`npm run build`：通过；最终打包前置构建分别完成 1764 和 6890 个模块，Web 构建仅有既有 chunk 大小警告。
+- `cargo test --manifest-path crates/web-protocol/Cargo.toml`：7/7 通过。
+- `cargo test --manifest-path apps/server/Cargo.toml`：45/45 通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib web_`：35 项通过、1 项环境探测忽略。
+- `cargo check --manifest-path src-tauri/Cargo.toml`、本轮 Rust 文件 `rustfmt --check`、`git diff --check`：通过；仅有仓库既有 CRLF 转换提示。
+- codebase-memory 已以 moderate 模式刷新；`detect_changes(scope=working)` 因长期功能分支已有 53 个改动文件而噪声较大，未报告额外 impacted symbols，最终以协议构造点检索、聚焦源码复核和上述测试界定影响范围。
+- `npm run tauri:build:local -- --bundles nsis`：退出码 0。安装包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_x64-setup.exe`，25,830,378 字节，2026-09-09 01:03:38，SHA-256 `78FFA29BF319F43AD3C80F0CF84D1FA3445ED9D2F1AFFB5C7BE70A7E9A2759C5`。
+
+### 未覆盖与现场边界
+
+- 未替用户安装新包，也未在用户真实桌面/Web 双端执行长时间 TUI、浏览器刷新重连、桌面卸载/重新挂载后的尺寸所有权切换人工回归。
+- 未使用真实异地组网设备验证防火墙、虚拟网卡路由、HTTP/HTTPS 证书和 Origin；这些环境项需在安装后按实际网络验证。
+
+## Web 终端关闭按钮与桌面首帧重绘交付（2026-09-09）
+
+### 验证结果
+
+- `npx tsc --noEmit`、`npm run web:build`、`git diff --check`：通过；Web 构建仅保留既有 chunk 体积警告。
+- `npm run tauri:build:local -- --bundles nsis`：退出码 0，前端资源与 Rust 桌面程序均重新编译。
+- 交付安装包：`src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_terminal-close-first-frame_20260909_x64-setup.exe`。
+- 文件大小：25,861,698 字节；SHA256：`9C5BA611B884A72F08F9770279A091D616DC3EA9AD0C6D54DEDC44058368FAE2`。
+## Web 终端关闭语义修复（2026-09-09）
+
+### 根因与发现清单
+
+- 根因位于 Web 终端生命周期协议：网页关闭原先只发送 `detach`，桌面 bridge 仅释放观察连接，因此真实 PTY 仍继续运行；修复落在协议和桌面 PTY 关闭入口。
+- 已覆盖协议枚举、服务端命令校验、桌面端 Web bridge、浏览器模型关闭入口；`detach` 继续用于页面切换、刷新和断线。
+- 关闭请求调用现有 `TerminalProcessManager.close`，随后清理 Web observer 并发布终止状态；重复关闭和已退出会话保持幂等。
+
+### 验证结果
+
+- `npx tsc --noEmit`：通过。
+- `cargo test --manifest-path crates/web-protocol/Cargo.toml`：7 项通过，含 `close` 帧序列化往返。
+- `cargo test --manifest-path apps/server/Cargo.toml ws::tests:: --lib`：8 项通过。
+- `git diff --check`：通过（仅仓库既有 CRLF 转换提示）。
+- `npm run tauri:build:local -- --bundles nsis`：退出码 0；交付包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_web-close_20260909_x64-setup.exe`，25,869,891 字节，SHA256 `2569D3F7C0AAB4AA7E4336A8DA40158DFB97B6B823774AD8D891A30464E1DF20`。
+
+### 后续回归修复
+
+- 现场日志显示旧实现只结束 PTY/观察连接，没有调用桌面 `terminalStore.closeSession`，导致桌面标签状态残留。
+- Web close 现复用 `closeSession`，并在会话仍受保护未关闭时上报错误状态，避免虚报退出。
+- `npx tsc --noEmit`、`node scripts/terminalExitCleanup.test.mjs`、`node scripts/ptyHostSocket.test.mjs`：通过。
+- `npm run tauri:build:local -- --bundles nsis`：退出码 0；修复包为 `src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_web-close-sync_20260909_x64-setup.exe`，25,872,006 字节，SHA256 `80CE66AD4778007DC1070ADA19DCAEA2682DDE26132CF38E3554F0353D3DDE75`。
+
+## Web 多终端标签与可见性调度（2026-09-10）
+
+### 验证结果
+
+- `npm run web:typecheck`、`npx tsc --noEmit`、`npm run web:build`：通过；仅保留既有前端 chunk 体积警告。
+- `node apps/web/src/terminalStream.test.mjs`：3 项通过，覆盖多会话独立缓冲、渲染游标和清理。
+- `node src/lib/webTerminalFrames.test.mjs`：4 项通过；`node src/lib/webBridgePolling.test.mjs`：5 项通过；`git diff --check`：通过。
+- Chrome 实机冒烟：启动 `cpa` 与 `amazon` 两个真实终端，页面出现两个标签；切换后上下文和可见面板同步，分别关闭后标签归零。
+- NSIS 安装包：`src-tauri/target/release/bundle/nsis/CLI-Manager_1.3.9_web-multi-terminal-tabs_20260910_x64-setup.exe`，25,870,506 字节，SHA256 `58D7D2E3BD4C1AE9456531724DFEB4A7E3FE22C89D237621FF7BAAC2FAD3FC19`。
+
+### 发布说明
+
+- 构建最后提示未配置 `TAURI_SIGNING_PRIVATE_KEY`，因此更新签名步骤返回码为 1；NSIS 安装包已正常生成，可直接安装测试。

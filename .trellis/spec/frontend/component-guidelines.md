@@ -54,9 +54,41 @@ terminalProcessManager.subscribeOutput(sessionId, (delivery) => {
 
 **Tests**: Run `npx tsc --noEmit` and `node --test scripts/ptyHostSocket.test.mjs scripts/terminalProcessManager.test.mjs scripts/terminalReplay.test.mjs scripts/terminalResizeDebouncer.test.mjs scripts/terminalResizeRenderBarrier.test.mjs scripts/terminalSplitLayout.test.mjs scripts/terminalReflowPolicy.test.mjs`; manually verify background output, reconnect replay, rapid split/fullscreen shrink, equal text sharpness across adjacent panes, transparent terminal backgrounds, IME, WebGL fallback, and no duplicate output after daemon reconnect.
 
+## Convention: Terminal scroll-to-bottom affordances use xterm Buffer state
+
+**What**: A terminal-local jump-to-bottom control derives its visibility from the active xterm Buffer, not from browser scrollbar geometry. Show it only when `buffer.type === "normal" && buffer.viewportY < buffer.baseY`.
+
+**Why**: xterm's Buffer is the source of truth for normal scrollback, alternate-screen state, reflow, and programmatic scrolling. Reading `.xterm-viewport.scrollTop` can miss xterm state changes and can couple UI behavior to WebView scrollbar implementation details.
+
+**Contracts**:
+
+- Keep the state in the `XTermTerminal` instance so hidden, split, and Workspan sessions do not share scroll position UI.
+- Recompute after `onScroll`, `onWriteParsed`, `onResize`, and `onRender`; retain any existing event behavior in those handlers.
+- Clicking the control calls the current terminal's public `scrollToBottom()` API and sends no PTY input.
+- Do not show the control for the alternate buffer or for a normal buffer already at `viewportY === baseY`.
+- If another terminal control occupies the same corner, compose both controls in one positioned vertical group instead of stacking independent absolute elements.
+- The persisted `keyboardShortcuts.scrollToBottom`, `keyboardShortcuts.pageUp`, and `keyboardShortcuts.pageDown` bindings are handled by the xterm custom key handler only while `buffer.active.type === "normal"`; `scrollToBottom()` and `scrollPages(±1)` must not be sent to or replace input for an alternate-screen TUI.
+
+**Correct**:
+
+```tsx
+const buffer = terminal.buffer.active;
+const showScrollToBottom = buffer.type === "normal" && buffer.viewportY < buffer.baseY;
+```
+
+**Wrong**:
+
+```tsx
+const showScrollToBottom = terminal.element?.querySelector(".xterm-viewport")?.scrollTop !== 0;
+```
+
+**Tests**: Assert the normal-buffer predicate, all four xterm event subscriptions, public `scrollToBottom()` use, and no PTY write in the control handler. Manually verify normal scrollback, alternate-buffer TUI, output, scrollbar/keyboard scrolling, reflow, split panes, hidden sessions, and coexistence with other bottom-corner controls.
+
 ### Convention: Terminal CLI-specific input uses immutable metadata plus bounded runtime detection
 
-**What**: Input behavior that differs by CLI must first use the `TerminalSession.cliTool` captured when the Agent terminal was created, then compatible project/title/startup metadata. A plain Shell that manually starts a CLI may use current viewport TUI signatures as a bounded runtime fallback.
+**What**: Input behavior that differs by CLI must first use the `TerminalSession.cliTool` captured when the Agent terminal was created, then compatible project/title/startup metadata. A plain Shell that manually starts a CLI may use exact submitted-command evidence plus a current viewport TUI signature as a bounded runtime fallback.
+
+The host Enter handler routes through `resolveTerminalNewlineKeyEvent(event, { shortcut, usesEscCrComposerNewline })`, which returns `write` with either `ESC + CR` or `LF`, `swallow` for unmatched host-managed combinations, and `pass` for a native `Alt + Enter` owned by a confirmed Grok/Codex session.
 
 **Why**: Project records, Tab titles, and startup commands are not a complete runtime identity. A locally created terminal may intentionally omit `projectId`, and users may start Codex manually. Persisting a guessed runtime CLI back into the session is also unsafe because the process can exit back to the Shell.
 
@@ -64,35 +96,41 @@ terminalProcessManager.subscribeOutput(sessionId, (delivery) => {
 // Wrong: misses immutable session identity and manually launched CLIs.
 const codex = project.cli_tool === "codex" || CODEX_COMMAND_PATTERN.test(session.startupCmd);
 
-// Correct: stable metadata first; runtime fallback is limited to the current viewport.
-const codex = session.cliTool === "codex"
-  || project.cli_tool === "codex"
-  || matchesCodexStartupMetadata(session)
-  || hasCodexTuiViewport(terminal);
+// Correct: stable metadata first; manual evidence is component-local and limited to the current viewport.
+const multilineInput = isCodexTerminalContext(context)
+  || isGrokTerminalContext(context)
+  || hasCodexTuiViewport(terminal)
+  ? "\x1b\r"
+  : "\n";
 ```
 
 **Contracts**:
 
 - Configured shortcut matching remains authoritative; runtime detection chooses only the PTY byte sequence.
-- Codex multiline input uses `ESC + CR`; ordinary Shell and Claude input keep their existing sequence.
+- Codex and Grok Build multiline input use `ESC + CR`; ordinary Shell and Claude input keep their existing sequence.
+- When Grok Build or Codex is active, an unmatched native `Alt+Enter` is passed through to xterm so the CLI can emit its own `ESC + CR`; unmatched Shift/Ctrl+Enter remain swallowed by the host shortcut policy.
 - Runtime detection must inspect only the current viewport; off-viewport scrollback is historical evidence and must never establish current CLI identity.
+- A plain Shell may establish a manual CLI fallback only after an exact launch command was submitted through the input buffer and the current viewport still contains the CLI's TUI composer prompt. The fallback is component-local, is cleared when that prompt disappears or the terminal detaches, and is never persisted as `TerminalSession.cliTool`.
 - Do not assume Codex uses the alternate buffer. Normal/alternate behavior depends on CLI version, launch arguments, and user configuration.
-- Project-managed Codex sessions should still prefer `TerminalSession.cliTool` or other immutable startup metadata over viewport text.
+- Project-managed Codex and Grok Build sessions should still prefer `TerminalSession.cliTool` or other immutable startup metadata over viewport text.
 - Do not introduce foreground-process IPC solely to infer this input behavior unless local, WSL, and SSH process ownership contracts are designed together.
 
 **Good/Base/Bad Cases**:
 
 - Good: a project Agent terminal remains identifiable after project metadata changes because its session captured `cliTool`.
-- Base: a normal Shell uses normal newline behavior; manually running `codex` in either normal or alternate buffer enables Codex newline encoding without requiring Hook installation.
+- Base: a normal Shell uses normal newline behavior; manually running `codex` in either normal or alternate buffer enables Codex newline encoding without requiring Hook installation, while Grok Build uses the same encoding when stable session metadata identifies it.
 - Good: once Codex TUI signatures leave the current viewport, runtime fallback stops matching.
+- Good: a plain Shell that submits the exact `grok` executable command receives the Grok fallback only while its current viewport still shows the TUI composer prompt; returning to the Shell clears the fallback.
 - Bad: requiring `buffer.type === "alternate"`; `--no-alt-screen` and user configuration make legitimate Codex sessions stay in the normal buffer.
+- Bad: classifying `echo grok`, `grok-helper`, or arbitrary scrollback text as a running Grok session.
 - Bad: permanently setting `session.cliTool = "codex"` from viewport text or one Hook event without an authoritative exit transition.
 
 **Tests Required**:
 
-- Assert project-session detection reads `TerminalSession.cliTool`.
+- Assert project-session detection reads `TerminalSession.cliTool` and recognizes Grok Build stable metadata.
 - Assert visible normal- and alternate-buffer `OpenAI Codex` and `/model to change` signatures are recognized.
 - Assert ordinary Shell, Claude, and off-viewport Codex text are rejected.
+- Assert an exact manually submitted `grok` command can enable the component-local fallback only with a visible TUI composer prompt, and that `echo grok` / `grok-helper` plus a returned Shell prompt are rejected.
 - Run `node --test scripts/terminalNewlineShortcut.test.mjs` and `npx tsc --noEmit`.
 
 ### Convention: OSC color-query normalization has no frontend PTY side effects
@@ -117,21 +155,11 @@ terminalProcessManager.write(sessionId, colorReply);
 
 **Tests**: Run `node --test scripts/terminalOsc.test.mjs`; assert both live and replay queries are filtered and `useTerminalOsc.ts` contains no `terminalProcessManager.write` or `replyToColorQueries` path.
 
-> How components are built in this project.
-
----
-
-## Overview
-
-(To be filled by the team)
-
----
-
 ## Component Structure
 
 ### Convention: User-facing app shell text goes through `useI18n`
 
-**What**: New or changed user-facing labels, button text, menu text, aria labels, tooltips, settings titles, empty states, toast messages, OS notifications, stats/history text, and hook-notification script text must use `src/lib/i18n.ts` through `useI18n()` or `translateCurrent()` instead of hard-coded Chinese/English strings. Persisted language preference lives in `settingsStore.language` as `"auto" | "zh-CN" | "zh-TW" | "en-US"`.
+**What**: New or changed user-facing labels, button text, menu text, aria labels, tooltips, settings titles, empty states, toast messages, OS notifications, stats/history text, and hook-notification script text must use `src/shared/i18n/index.ts` through `useI18n()` or `translateCurrent()` instead of hard-coded Chinese/English strings. Persisted language preference lives in `settingsStore.language` as `"auto" | "zh-CN" | "zh-TW" | "en-US"`.
 
 **Why**: Language switching must be consistent across visible shell UI. Keeping translation keys in one local module avoids adding a heavyweight i18n dependency while the app supports Simplified Chinese, Traditional Chinese, and English.
 
@@ -351,7 +379,7 @@ function Panel({ items = [] }: { items?: Item[] }) {
 
 ### Convention: Markdown rendering goes through the shared MarkdownContent component
 
-**What**: Any UI that renders user/session/release Markdown must use `src/components/ui/MarkdownContent.tsx`. Do not import `react-markdown` directly from feature components.
+**What**: Any UI that renders user/session/release Markdown must use `src/shared/ui/MarkdownContent.tsx`. Do not import `react-markdown` directly from feature components.
 
 **Why**: Markdown content comes from history files, prompts, update notes, and tool transcripts. Keeping rendering in one component preserves the same GFM support, `skipHtml` safety policy, link behavior, image placeholder behavior, code highlighting, search highlighting, and GitHub-style visual treatment everywhere.
 
@@ -382,7 +410,7 @@ import ReactMarkdown from "react-markdown";
 - Scope terminal-variant CSS overrides to the caller container (for example a transcript shell or file-preview wrapper). Do not widen `.ui-markdown-terminal` defaults just to fix one surface.
 - The terminal background image is owned by `.ui-terminal-bg-layer`; when `data-bg-enabled="true"`, the Markdown preview must reveal that same pseudo-element layer through a translucent surface instead of loading a second asset. Controls that are direct children of the wrapper need a z-index above the generic direct-child stacking rule.
 - Terminal Markdown preview may unwrap one top-level `md` / `markdown` fenced source block before passing it to the shared renderer; nested code fences remain literal code. The preview must source all non-empty assistant messages from the loaded `HistorySessionDetail` and provide a stable message selector instead of silently discarding earlier responses.
-- When changing Markdown styles, update `src/components/ui/markdownSample.ts` so the manual preview covers the new element or edge case.
+- When changing Markdown styles, update `src/shared/ui/markdownSample.ts` so the manual preview covers the new element or edge case.
 
 **Tests**: Run `npx tsc --noEmit` and `npm run build`; manually inspect the Markdown style preview in Settings > About in both default and terminal variants. If the change targets a terminal-only caller such as a transcript or file preview, also verify that scoped caller still matches the active terminal theme while the other `variant="terminal"` callers keep their prior appearance.
 
@@ -645,7 +673,7 @@ if (becameVisible) scheduleFit(true, false);
 
 ### Convention: Session history transcripts use a history render layer before Markdown
 
-**What**: When rendering Claude/Codex session history message bodies, use `src/components/history/SessionTranscriptContent.tsx` instead of rendering raw message content directly with `MarkdownContent`. `SessionTranscriptContent` may detect session-log structures such as XML-ish blocks, workflow-state blocks, Git status lines, long lists, paths, commit hashes, and status tokens; ordinary Markdown content must still delegate to `HistoryMarkdownContent` / shared `MarkdownContent`.
+**What**: When rendering Claude/Codex session history message bodies, use `src/features/history/api/SessionTranscriptContent.tsx` instead of rendering raw message content directly with `MarkdownContent`. `SessionTranscriptContent` may detect session-log structures such as XML-ish blocks, workflow-state blocks, Git status lines, long lists, paths, commit hashes, and status tokens; ordinary Markdown content must still delegate to `HistoryMarkdownContent` / shared `MarkdownContent`.
 
 **Why**: History files are mixed transcripts, not pure Markdown. They contain system context, workflow metadata, Git changes, paths, and task states. A render-layer adapter preserves readability without changing backend history parsing, storage, or the shared Markdown safety policy.
 
@@ -667,11 +695,12 @@ import { SessionTranscriptContent } from "./SessionTranscriptContent";
 
 - Keep transcript parsing render-only; do not mutate stored history data or backend parsing contracts for visual grouping.
 - Keep unsupported transcript text safe by falling back to the shared Markdown path.
+- `HistoryMarkdownContent` may unwrap one complete top-level `md` / `markdown` source fence before handing history content to `MarkdownContent`, so fenced GFM tables render as tables; ordinary, partial, mislabeled, and nested code fences remain literal code.
 - Do not use `dangerouslySetInnerHTML` for transcript highlighting.
 - Do not add a second Markdown parser inside history components.
 - Long transcript sections should remain bounded through collapse/preview behavior so virtualized message rows do not inflate unnecessarily.
 
-**Tests**: Run `npx tsc --noEmit`; manually inspect a history session containing XML-ish blocks, workflow-state blocks, Git changes, long lists, and normal Markdown.
+**Tests**: Run `npx tsc --noEmit`, `node --test scripts/historyMarkdownRendering.test.mjs`, and manually inspect a history session containing XML-ish blocks, workflow-state blocks, Git changes, long lists, normal Markdown, a fenced GFM table, ordinary code, and nested code fences in both app themes.
 
 ### Convention: History session parent-child grouping is render-only and conservative
 
@@ -882,6 +911,10 @@ type PaneDropTarget =
 **Intent boundary**:
 
 - A Workspan dragged inside the top tab bar remains a sortable tab operation.
+- Middle-clicking either a session Tab or a Workspan Tab calls the existing
+  close path after preventing the browser's auxiliary-click default. Ignore it
+  while the Tab is being renamed or dragged; do not introduce a second close
+  or confirmation path.
 - Once the pointer enters a pane content rectangle, its outer directional regions become split targets. Resolve left/right/top/bottom from the pointer position relative to the pane center, while keeping a neutral center region so entering a pane does not immediately force a split.
 - Session tabs inside a multi-view pane keep the existing center-move and explicit edge-split behavior.
 - Collision detection identifies the pane only. Resolve the Workspan split direction in `onDragOver` and `onDragEnd` from `activatorEvent + delta` and `over.rect`; do not synthesize a pane-edge collision inside the collision detector.
@@ -911,7 +944,7 @@ const horizontalTransform = transform ? { ...transform, y: 0 } : transform;
 
 ### Convention: Drag responsiveness uses shared thresholds and frame-bounded previews
 
-**What**: Sortable surfaces use `DND_ACTIVATION_CONSTRAINT` and `DND_SORTABLE_TRANSITION` from `src/lib/dragInteraction.ts`. Custom pointer drags use the same start distance, while cursor-following previews update DOM transforms at most once per animation frame.
+**What**: Sortable surfaces use `DND_ACTIVATION_CONSTRAINT` and `DND_SORTABLE_TRANSITION` from `src/features/workspace/api/dragInteraction.ts`. Custom pointer drags use the same start distance, while cursor-following previews update DOM transforms at most once per animation frame.
 
 **Why**: Divergent 5-8px activation distances and dnd-kit's default 200ms transform transition make similar drag surfaces feel inconsistent. Calling a large parent component's `setState` on every `pointermove` also rerenders expensive trees and terminal children faster than the browser can paint.
 
@@ -1132,13 +1165,37 @@ const { suffixParts, leaf: displayNode } = collectCompactDirectoryChain(node);
 
 ---
 
-## Props Conventions
-
-(To be filled by the team)
-
----
-
 ## Styling Patterns
+
+### Convention: Project-tree hover actions preserve row geometry
+
+**What**: A project row in `TreeNodeItem` that uses `.ui-tree-item-actions` must keep its action container in the flex layout at all times. Let the existing `.ui-tree-item-actions` opacity, visibility, pointer-events, and transform rules control the hover transition; do not swap the container between Tailwind `hidden` and `group-hover:flex`.
+
+**Why**: Toggling `display` inserts the 22px start-action button only after the pointer enters the row. In a narrow sidebar this reflows the project title and badges, which appears as hover jitter and can make the pointer target feel unstable.
+
+**Correct**:
+
+```tsx
+<span className="ui-tree-item-actions flex shrink-0 items-center gap-0.5">
+  <button className="icon-btn">…</button>
+</span>
+```
+
+**Wrong**:
+
+```tsx
+<span className="ui-tree-item-actions hidden shrink-0 group-hover/item:flex">
+  <button className="icon-btn">…</button>
+</span>
+```
+
+**Contracts**:
+
+- The project title and metadata keep a stable available width before, during, and after hover.
+- The hidden action remains non-interactive until the existing hover/focus CSS exposes it.
+- Do not change project selection, drag activation, double-click launch, or the folder/worktree action contracts as part of this visual fix.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`. Manually hover a project with a long name and terminal/provider badges in compact and comfortable sidebar density, then verify the title, badges, row position, hover action, click, double-click, and drag behavior stay stable in one light and one dark theme.
 
 ### Convention: Terminal auxiliary panels share one themed header
 
@@ -1170,7 +1227,7 @@ const { suffixParts, leaf: displayNode } = collectCompactDirectoryChain(node);
 
 ### Convention: Stats charts use a shared semantic palette
 
-**What**: Stats and usage-analysis chart components should import semantic colors from `src/components/stats/statsPalette.ts` instead of hard-coding one-off hex/RGBA colors for token series, peak markers, cost fills, or chart tooltips.
+**What**: Stats and usage-analysis chart components should import semantic colors from `src/features/stats/api/statsPalette.ts` instead of hard-coding one-off hex/RGBA colors for token series, peak markers, cost fills, or chart tooltips.
 
 **Why**: The app supports multiple light/dark themes. Hard-coded high-saturation chart colors can clash with theme surfaces and make related charts disagree visually. A shared palette keeps History Stats and ccusage charts consistent while still deriving colors from theme tokens.
 
@@ -1225,12 +1282,6 @@ const option = {
 - Keep page-level search behavior only on tabs that actually consume `searchValue`.
 
 **Tests**: For settings visual migrations, run `npx tsc --noEmit` and `npm run build`; desktop runtime UI verification remains manual.
-
----
-
-## Accessibility
-
-(To be filled by the team)
 
 ---
 
@@ -1374,9 +1425,9 @@ terminal.options.theme = isTransparent ? applyTransparency(theme) : theme;
 
 **Why "always on" instead of "rebuild the Terminal on toggle"**: Rebuilding loses scrollback, breaks the PTY data stream wiring, and incurs ~50 ms of GPU/font setup. xterm's WebglAddon is alpha-capable (`alpha: true` is the default WebGL context flag), so the cost of `allowTransparency: true` is a small constant per-frame — research measured ~5-10% FPS in pathological cases, imperceptible in normal terminal use.
 
-**Reference**: `src/components/XTermTerminal.tsx` — sets `allowTransparency: true` unconditionally; the hot-update `useEffect` only swaps `terminal.options.theme` via `applyTransparency` helper in `src/lib/terminalThemes.ts`.
+**Reference**: `src/features/terminal/index.ts` — sets `allowTransparency: true` unconditionally; the hot-update `useEffect` only swaps `terminal.options.theme` via `applyTransparency` helper in `src/shared/lib/terminalThemes.ts`.
 
-**Contrast contract**: Transparent terminal background compositing must be theme-brightness aware. Dark terminal themes may use black alpha for the xterm cell background and image overlay, but light terminal themes must use white alpha so muted ANSI text stays readable. Light terminal themes should avoid WebGL because its glyph rendering and alpha compositing can make glyph edges look soft on bright surfaces even without a background image. Do not increase xterm `fontWeight` as a contrast fix; it can change cell metrics and make glyphs collide in light themes. Keep xterm's measured font and rendered font aligned: if global UI font CSS touches `.xterm`, route it through `--terminal-font-family` from `XTermTerminal` instead of `revert` or a hard-coded stack. Keep the decision centralized in `src/lib/terminalThemes.ts` helpers such as `isLightTerminalTheme`, `applyTransparency`, `getTerminalBackgroundOverlayColor`, and `getTerminalMinimumContrastRatio`; do not hardcode `rgba(0,0,0,...)` in `XTermTerminal` or terminal background CSS.
+**Contrast contract**: Transparent terminal background compositing must be theme-brightness aware. Dark terminal themes may use black alpha for the xterm cell background and image overlay, but light terminal themes must use white alpha so muted ANSI text stays readable. Light terminal themes should avoid WebGL because its glyph rendering and alpha compositing can make glyph edges look soft on bright surfaces even without a background image. Do not increase xterm `fontWeight` as a contrast fix; it can change cell metrics and make glyphs collide in light themes. Keep xterm's measured font and rendered font aligned: if global UI font CSS touches `.xterm`, route it through `--terminal-font-family` from `XTermTerminal` instead of `revert` or a hard-coded stack. Keep the decision centralized in `src/shared/lib/terminalThemes.ts` helpers such as `isLightTerminalTheme`, `applyTransparency`, `getTerminalBackgroundOverlayColor`, and `getTerminalMinimumContrastRatio`; do not hardcode `rgba(0,0,0,...)` in `XTermTerminal` or terminal background CSS.
 
 **Prevention checklist when wiring a new xterm appearance feature**:
 
@@ -1513,6 +1564,21 @@ textarea.style.display = "none";
 - [ ] Chinese/IME composition still positions the candidate window correctly.
 - [ ] `node --test scripts/terminalImeAnchor.test.mjs scripts/terminalImeComposition.test.mjs` confirms real-cursor priority, prompt fallback, Process-key synchronous re-pinning, resize invalidation, composition cleanup ordering, and cancellation for a new composition/disposal.
 
+### Convention: Deduplicate macOS IME input at the shared forwarding boundary
+
+**What**: Keep terminal-input de-duplication in the one shared PTY forwarding path. Preserve the existing 80 ms exact cross-source rule for xterm onData versus native-text recovery. For macOS only, allow the IME controller to arm a short Process-key checkpoint from a helper-textarea keydown(229); while that checkpoint is live, reject only an exact non-ASCII onData re-emission.
+
+**Why**: WebKit IMEs can deliver input before keydown(229). xterm may emit that CJK payload directly and then emit it again from its deferred helper-textarea diff fallback. Both producer paths then look like onData, so a source-only rule cannot see the duplicate. PTY-side filtering is too late because it loses the browser event boundary and can erase intentional repeated input.
+
+**Contracts**:
+
+- The forwarding controller owns the last accepted payload and Process-key checkpoint; individual CLI views, PTY code, and output transforms must not implement competing text filters.
+- The IME DOM controller notifies the forwarding controller only after verifying that the Process key came from xterm's helper textarea. A new composition start clears the checkpoint.
+- Same-source matching is macOS-only, non-ASCII-only, exact-payload-only, and expires within the existing 400 ms Process-key recovery horizon. It must not become a general recent-input history filter.
+- A new composition must allow an intentional second commit of the same Chinese text. Windows, Linux, normal ASCII input, Enter, Backspace, paste, and the native recovery path retain their existing behavior.
+
+**Tests**: Run node --test scripts/terminalImeInputDedup.test.mjs scripts/terminalImeComposition.test.mjs and npx tsc --noEmit. Cover cross-source de-duplication, input-before-229 same-source re-emission, accumulated deferred payloads, composition reset, expiration, and disabled-platform behavior.
+
 ### Common Mistake: Estimating xterm IME cell size from container bounds
 
 **Symptom**: IME candidate popup or composition caret drifts on secondary monitors, mixed-DPI displays, or after display-scale changes even though the terminal prompt row detection is correct.
@@ -1597,6 +1663,31 @@ If a CLI draws large opaque panels or status rows over a terminal background ima
 
 Do not keep WebGL enabled while a terminal background image is active. The default renderer is the safer path for transparent backgrounds and xterm buffer-attr corrections; WebGL can preserve or redraw opaque TUI cells in ways that make Codex/Ratatui panels appear as black blocks.
 
+On a light terminal theme, a CLI that renders with its own dark theme paints message blocks that outlive every prompt-row heuristic: the submitted prompt scrolls up out of the composer area, and the Claude light-theme pass only covers patch rows plus the app-owned slash-menu highlight. Erase those blocks by resolved cell color instead of by row shape:
+
+- Gate the pass on theme brightness plus session identity (a Claude or Pi context), and accept a latched AI TUI signature as the plain-shell fallback for a CLI started by hand. Never require the latch: the welcome banner that sets it scrolls away while the black block keeps coming back.
+- Resolve what xterm will actually paint before judging a cell: RGB attrs directly, palette attrs through the active theme's ANSI entries with the xterm 256 cube and gray ramp as fallback, and never default-background cells — the terminal theme owns those, no CLI does.
+- Clear only near-neutral dark backgrounds (relative luminance <= 0.28 and chroma <= 96) so colored badges, diff markers, and light selection highlights survive the pass.
+- Require several dark cells on the row (>= 4). A one- or two-cell dark background is a TUI block cursor, not a painted block.
+- Do not clear the foreground here. Light themes run with `minimumContrastRatio: 6`, so xterm re-derives a readable foreground once the dark background is gone; clearing it would also discard configured TUI user/assistant colors.
+
+### Convention: Terminal-side preview panels share one theme resolver
+
+**What**: The Markdown preview, subagent transcript, session replay, and the in-terminal Git diff viewer resolve their colors through `useTerminalPreviewTheme()` (backed by `src/shared/lib/terminalPreviewTheme.ts`). Panels must not call `getTerminalTheme()` / `isLightTerminalTheme()` themselves, and must not read `terminalThemeName` + the two palettes to re-derive brightness.
+
+**Why**: These panels follow the terminal theme by default but can be pinned to an independent preset (`terminalPreviewThemeName`, `follow-terminal` when unset). Every panel that judges brightness on its own drifts out of the family the first time that setting is used — and one of them silently kept following the *app* theme for code blocks before this was centralized.
+
+**Contracts**:
+
+- `resolveTerminalPreviewTheme()` owns the follow-vs-independent decision, brightness, and the panel CSS variable scope. Anything that is not a known preset id — a stale value from settings sync, a renamed preset — resolves to "follow the terminal", never to a broken panel.
+- A panel re-themes its subtree by putting `panelStyle` on its own root, not by writing global `--term-panel-*`. `App.tsx` keeps owning the global variables for terminal-side chrome (stats, providers, resources, tab bar); those must not move with the preview theme.
+- `TERM.*` from `termStatsUi` are `var(--term-panel-*)` references, so the local scope is enough — do not resolve colors in JS and inline them.
+- The terminal's custom text-color override applies only while following the terminal; an independently chosen preset keeps its own foreground.
+- Code-block brightness comes from the resolver's `tone`. When a caller needs the terminal code theme without terminal link behavior, pass `linkBehavior="preview"` explicitly — `MarkdownContent` derives it from `variant` otherwise.
+- The settings library grid is one component (`TerminalThemePresetGrid`); tone filtering, search, and the terminal library's auto/system special case stay in the host section.
+
+**Tests**: `node --test scripts/terminalPreviewTheme.test.mjs scripts/gitDiffThemeWorkflow.test.mjs` plus `npx tsc --noEmit`; manually verify follow mode against a light and a dark terminal theme, then an independent preset of the opposite brightness across all four panels.
+
 ### Convention: Click-based terminal cursor relocation is unsupported
 
 **What**: Clicking terminal content does not reposition the PTY line-editor cursor. The application must not register a click handler that emits cursor-movement sequences.
@@ -1632,7 +1723,7 @@ const terminal = new Terminal({
 - Keep the policy generic; do not detect Grok or another CLI by process name.
 - A shell that has not enabled mouse reporting keeps normal xterm text selection behavior.
 - A mouse-aware TUI receives ordinary mouse reports; Shift remains the selection modifier.
-- Mouse policy belongs in `src/terminal/browser/TerminalMouseInteraction.ts`; `XTermTerminal` only assembles it.
+- Mouse policy belongs in `src/features/terminal/browser/TerminalMouseInteraction.ts`; `XTermTerminal` only assembles it.
 
 **Tests**: Run `node --test scripts/terminalMouseInteraction.test.mjs` and `npx tsc --noEmit`; manually verify Grok fullscreen click/drag/wheel, Shift+drag selection in a mouse-aware TUI, and ordinary shell selection.
 
@@ -1681,23 +1772,29 @@ invoke("pty_write", { sessionId, data });
 - [ ] CMD still accepts normal paste and Enter behavior.
 - [ ] Browser text/image paste, app-internal file drag, and system file drop all focus the intended visible terminal only once.
 
-### Scenario: File explorer path actions and cross-project terminal drag
+### Scenario: File path actions and cross-project terminal drag
 
 #### 1. Scope / Trigger
 
-- Trigger: the file explorer adds relative/absolute path copy actions and sends a file or directory to an in-app terminal through drag-and-drop.
-- Boundary: the file explorer is the producer, `terminalFileDrag` is the in-memory/DataTransfer contract, and `useTerminalInput` resolves the payload for the target terminal session.
+- Trigger: the file explorer or Git Changes tree sends a project file or directory to an in-app terminal through drag-and-drop.
+- Boundary: source rows use `useTerminalFilePointerDrag`; `terminalFileDrag` owns the in-memory/DataTransfer contract; `useTerminalInput` resolves the payload for the target terminal session.
 
 #### 2. Signatures
 
 - `formatRelativeProjectFilePath(relativePath, kind)` returns the normalized project-relative path.
 - `formatAbsoluteProjectFilePath(project, relativePath, kind)` joins the local project root or SSH `remote_path` with the relative path.
+- `TerminalFileDragProject` is the minimum project root accepted by `createTerminalFileDragPayload(project, relativePath, kind)`; it includes the project identity, local/remote roots, environment, SSH host, and CLI tool.
 - `TerminalFileDragPayload` contains `text`, `absolutePath`, and `source` (`id`, `path`, `remote_path`, `environment_type`, `ssh_host_id`).
 - `TERMINAL_FILE_DRAG_MIME` carries the serialized payload across the browser drag boundary.
 - A registered terminal drop zone accepts `paste(payload)`, not a pre-resolved string.
+- `useTerminalFilePointerDrag({ project, onDropOutsideTerminal? })` returns pointer handlers and the portal preview. Sources supply `{ path, kind }`.
 
 #### 3. Contracts
 
+- The file explorer and Git Changes tree may provide files and directories. Git rows must use `gitTreeProject`, whose root is the active Git repository rather than an enclosing project/worktree root.
+- File Explorer and Git Changes tree must share `useTerminalFilePointerDrag`; producers must not duplicate pointer threshold, preview, drop-zone, or click-suppression state.
+- The hook begins a drag only after `POINTER_DRAG_START_PX`, builds `TerminalFileDragPayload`, updates the registered terminal drop-zone point, and commits through `commitTerminalFileDragDrop()`.
+- File/directory-row action buttons (stage, discard, delete) are not drag handles. A completed pointer drag suppresses the source row's subsequent click once.
 - The source keeps the existing CLI-specific relative drag text for same-location drops.
 - The target compares the source location with its current project/worktree location using `isSameProjectFileLocation`.
 - Same project location uses `payload.text`; a different project, worktree, SSH host, or SSH remote root uses `payload.absolutePath`.
@@ -1708,6 +1805,11 @@ invoke("pty_write", { sessionId, data });
 
 | Condition | Behavior |
 | --- | --- |
+| No source project, non-primary pointer, or modifier-held pointer | Do not begin a terminal-file drag |
+| Pointer movement below `POINTER_DRAG_START_PX` | Preserve the normal source-row click |
+| Pointer starts on a Git row action button | Preserve the action and do not begin a drag |
+| Drop over a registered terminal | Commit the payload, paste once, focus that terminal, and suppress file-panel project sync once |
+| Drop outside a terminal | Run the source's optional outside-drop behavior, then clear the in-memory drag |
 | Same local/WSL root | Paste the relative drag text |
 | Different local/WSL root or worktree | Paste the source absolute path |
 | Same SSH host and remote root | Paste the relative drag text |
@@ -1717,29 +1819,30 @@ invoke("pty_write", { sessionId, data });
 
 #### 5. Good / Base / Bad Cases
 
-- Good: a file from project B is dropped into project A in a split pane and the terminal receives B's absolute path.
-- Base: a file from the current project's file panel is dropped into another pane for the same project and keeps the existing relative CLI format.
+- Good: a modified or untracked Git file or directory from repository B is dropped into project A in a split pane and the terminal receives B's absolute path.
+- Base: a file or directory from the current project's file panel or Git Changes tree is dropped into another pane for the same project and keeps the existing relative CLI format, with a trailing slash for directories.
+- Bad: giving Git Changes its own pointer-drag implementation; source panels drift in threshold, preview, or terminal drop behavior.
 - Bad: resolving the path when the drag starts and storing only one string; the target pane cannot detect that the source and target roots differ.
 - Bad: comparing only project IDs; two worktrees or two SSH roots can have different filesystem locations while sharing a project identity.
 
 #### 6. Tests Required
 
 - Static regression test asserts all file explorer context-menu variants expose both copy actions.
-- Static regression test asserts the drag payload includes source context, absolute fallback data, and the custom MIME field.
+- Static regression test asserts file explorer and Git Changes both route through `useTerminalFilePointerDrag`, with Git rows excluding action buttons and suppressing a post-drag click.
+- Static regression test asserts the shared drag payload includes source context, absolute fallback data, and the custom MIME field.
 - Static regression test asserts terminal drop resolution uses project/worktree location comparison and absolute fallback.
 - `npx tsc --noEmit` must cover the payload, drop-zone callback, and i18n keys.
-- Manually verify same-project pane, cross-project pane, cross-worktree pane, local/WSL, SSH same-root, SSH different-root, directory drag, and both `zh-CN`/`en-US` UI languages.
+- Manually verify file-explorer file/directory and Git file/directory drags (including modified and untracked trees) for same-project pane, cross-project pane, cross-worktree pane, local/WSL, SSH same-root, SSH different-root, and both `zh-CN`/`en-US` UI languages.
 
 #### 7. Wrong vs Correct
 
 ```tsx
-// Wrong: the target terminal cannot distinguish project B from project A.
-beginTerminalFileDrag(relativeText);
-dropZone.paste(relativeText);
+// Wrong: Git Changes owns a second drag lifecycle and can drift from the file explorer.
+onPointerMove={() => beginTerminalFileDrag(payload)};
 
-// Correct: resolve at the target boundary using the source and target roots.
-beginTerminalFileDrag({ text: relativeText, absolutePath, source });
-dropZone.paste(payload);
+// Correct: every source shares the payload, threshold, preview, and terminal commit contract.
+const drag = useTerminalFilePointerDrag({ project: gitTreeProject });
+onPointerDown={(event) => drag.handlePointerDown(event, { path: node.path, kind: "file" })};
 ```
 
 ### Convention: Terminal input selection state stays in the Input controller
@@ -1760,17 +1863,19 @@ dropZone.paste(payload);
 
 - Create one controller per terminal attachment; its selection state must start empty and dispose() must remove its DOM listeners.
 - Input owns the current-input buffer and cursor index. Callers must use the controller API rather than passing or mutating those refs.
+- Codex owns Shift+Left/Right (including the queued-question entry). The xterm key handler must clear synthetic input selection and return true before application selection handling, preserving modifiers even with empty input. Reuse session/runtime Codex detection; ordinary shell selection remains unchanged.
+- The window capture handler in useKeyboardShortcuts must yield terminal-targeted Shift+Left/Right before every global action, including user-recorded Tab or other bindings. Do not preventDefault, stop propagation, or read the active-session snapshot for this route; xterm owns Codex input versus shell selection. Only Shift without Ctrl/Alt/Meta is reserved. Outside terminals, existing bindings keep their scope; terminal Tab switching remains available through Alt/Ctrl. Keep the settings explanation in both languages aligned with this priority.
 - Use the existing terminalTextEditing and terminalCellWidth helpers for cursor indices and display cells. Do not approximate CJK/wide-character offsets with string length.
-- The shared TUI composer markers belong in src/lib/terminalTui.ts; selection and rendering import the same patterns instead of defining local copies.
+- The shared TUI composer markers belong in src/features/terminal/lib/terminalTui.ts; selection and rendering import the same patterns instead of defining local copies.
 - forwardTerminalInput() consumes a replacement selection before writing to the PTY, then clears only the state required by the original input path.
 
-**Tests**: Run npx tsc --noEmit; manually verify Ctrl/Cmd+A, Shift+Left/Right, collapse with Left/Right, Backspace/Delete, typing to replace a selection, Ctrl/Cmd+C selection copy versus Ctrl+C interrupt, and switching sessions after a selection.
+**Tests**: Run node --test scripts/codexQueuedQuestionShortcut.test.mjs and npx tsc --noEmit. Exercise the actual global capture listener followed by the xterm handler with Shift Tab bindings, single/multiple sessions, Codex/shell, empty/draft input, non-terminal editors, and Alt/Ctrl/compound modifiers; preserve Ctrl+W close requests. Manually verify Ctrl/Cmd+A, Shift+Left/Right, collapse with Left/Right, Backspace/Delete, typing to replace a selection, Ctrl/Cmd+C selection copy versus Ctrl+C interrupt, and switching sessions after a selection.
 
 ### Convention: Pi terminal compatibility stays outside XTermTerminal
 
-**What**: Shared IME input-anchor parsing lives in `src/lib/terminalImeAnchor.ts`, while IME DOM events
-and composition lifecycle stay in `src/lib/terminalIme.ts`. Shared CLI context parsing lives in
-`src/terminal/browser/TerminalCliContext.ts`.
+**What**: Shared IME input-anchor parsing lives in `src/features/terminal/lib/terminalImeAnchor.ts`, while IME DOM events
+and composition lifecycle stay in `src/features/terminal/lib/terminalIme.ts`. Shared CLI context parsing lives in
+`src/features/terminal/browser/TerminalCliContext.ts`.
 Pi IME positioning, ANSI transformation, and diagnostics live in `TerminalPiIme.ts`,
 `TerminalPiAnsiTransform.ts`, and `TerminalPiDiagnostics.ts`. `TerminalPiCompatibility.ts` is only
 the facade/state coordinator. `XTermTerminal` supplies context and connects narrow callbacks.
@@ -1954,6 +2059,8 @@ if (!isEdit && !isClone && trimmedCliArgs) {
 
 **Why**: `XTermTerminal` receives a real `.xterm-slider` from xterm.js, while a transcript's `overflow-y-auto` scrollbar is generated internally by WebView2/Chromium. Browser `::-webkit-scrollbar` hover behavior is platform-dependent and can change layout width, causing reflow and Pane jitter.
 
+For a third-party picker rendered in an open Shadow DOM, hide the browser-native scrollbar inside the shadow root, but render the absolutely positioned track/thumb in the stable React-owned host container (not inside the third-party root or its ShadowRoot). Position it from the real scroll container's bounding rect. Wheel/trackpad scrolling must remain owned by the scroll container; the overlay is only a visual indicator and drag target. If the picker is mounted imperatively, parent-provided callbacks must be read through refs so routine parent rerenders (for example popover/menu positioning) do not recreate the picker and reset category navigation or scroll position.
+
 **Correct**:
 
 ```tsx
@@ -1982,7 +2089,18 @@ if (!isEdit && !isClone && trimmedCliArgs) {
 
 **What**: The terminal Markdown preview uses the existing Radix Select primitive for historical answer selection. Its portal content must receive the terminal theme variables explicitly, and its viewport must use `ui-thin-scroll` with `--ui-scrollbar-thumb` / `--ui-scrollbar-track` from the terminal theme. Do not use a native `<select>` when the popup scrollbar or surface needs terminal styling.
 
-The preview can open when the session is a supported Claude/Codex session with a bound `cliSessionId`; a current-turn Hook status is not a prerequisite because restored sessions may have no new Hook event. `Ctrl`/`Cmd` plus wheel changes the preview Markdown scale only within the preview content, clamped to `0.8`–`1.6`; an unmodified wheel must keep normal scrolling.
+`MarkdownPreviewAnswerSelect` owns a terminal-style overlay thumb because Radix explicitly hides the native Viewport scrollbar. The Viewport is the only scroll source; pointer capture maps thumb movement to its scroll range, and wheel/keyboard scrolling updates the same thumb. The fixed list-end button sits outside that viewport and changes only scroll position. Its popup has dialog semantics containing a labeled listbox and a native button; Tab moves between the focused option and the fixed action, while Radix still owns selection and Escape dismissal. Bound the total popup height by both 228px and the available viewport height, reserving footer space.
+
+`useMarkdownPreviewScroll` binds a pending jump to the terminal/CLI session key and original message index. The body button changes only the current answer's scroll position; the header button chooses the last loaded answer by `messageIndex`, including repeated clicks on the same answer. Apply a jump after the matching content commit and keep its bottom anchor for delayed layout changes to that same content only. User scrolling, manual selection, new content, closing, or session changes cancel the anchor; normal background refresh must preserve an older selected answer. All observers/listeners are scoped to the rendered preview and cleaned up on close/unmount. A session identity change invalidates in-flight reads and closes superseded SSH consumers.
+
+Every configured Agent CLI terminal keeps the right-top preview control visible.
+It can open when its `cliTool` or project tool resolves to a registered
+`HistorySource` and the session has a bound `cliSessionId`; this includes Pi's
+native `pi` history source. A missing source or session ID disables the control
+instead of hiding it. A current-turn Hook status is not a prerequisite because
+restored sessions may have no new Hook event. `Ctrl`/`Cmd` plus wheel changes
+the preview Markdown scale only within the preview content, clamped to
+`0.8`–`1.6`; an unmodified wheel must keep normal scrolling.
 
 KaTeX's package stylesheet owns the `.katex` base font size. Shared Markdown CSS may set its color, but must not force `.katex` to `font-size: 1em`, which makes terminal formulas smaller and visually soft. Preview zoom should scale the Markdown container instead of using transforms that introduce raster blur.
 
@@ -2004,7 +2122,7 @@ KaTeX's package stylesheet owns the `.katex` base font size. Shared Markdown CSS
 <style>.ui-markdown .katex { font-size: 1em; }</style>
 ```
 
-**Tests**: Run `node --test scripts/terminalMarkdownPreview.test.mjs scripts/markdownRendering.test.mjs` and `npx tsc --noEmit`; manually verify long answer lists, keyboard selection, restored sessions without a new conversation, normal scrolling, `Ctrl`/`Cmd` wheel zoom limits, light/dark terminal themes, background images, and clear KaTeX formulas.
+**Tests**: Run `node --test scripts/terminalMarkdownPreview.test.mjs scripts/terminalMarkdownPreviewNavigation.test.mjs scripts/markdownRendering.test.mjs` and `npx tsc --noEmit`; manually verify long answer lists, thumb dragging, all three jump controls, Tab/Shift+Tab/Enter/Space/Escape, Pi and restored sessions without a new conversation, a configured CLI without a bound session ID, normal scrolling, `Ctrl`/`Cmd` wheel zoom limits, light/dark terminal themes, background images, and clear KaTeX formulas.
 
 ### Convention: Settings pages fill the available content width and wrap controls
 
@@ -2035,3 +2153,130 @@ KaTeX's package stylesheet owns the `.katex` base font size. Shared Markdown CSS
 ```
 
 **Tests**: Run `npx tsc --noEmit`; manually verify the page at a wide window, a narrow window, and both `zh-CN` and `en-US`, checking that cards use the available width and headers/actions do not overflow.
+
+### Convention: Host SFTP panes use the bounded File Explorer listing contract
+
+**What**: The local side of the SSH Host attachment dialog is a local directory browser, not a
+second rendering of the upload queue. It starts at the platform Desktop directory, lists entries
+through the existing Rust `file_list_dir` command with the selected directory as `rootPath` and an
+empty `relativePath`, and uses the same `@baybreezy/file-extension-icon` material file/folder icons
+as `FileExplorerSidebar`. The remote side uses the same material icon contract. Both pane headers
+stay aligned and both listing viewports use a fixed height with their own overflow scrolling.
+
+**Contracts**:
+
+- Directory rows navigate into the child directory; the local path field, directory picker,
+  parent button, and refresh button all replace or reload the current local browsing root.
+- File rows add the resolved local path to the existing transfer queue. The queue remains the
+  source of truth for upload status and is independent from the currently browsed directory.
+- Local browsing does not wait for SSH Agent initialization. A local directory failure is shown in
+  the local pane and must not be converted into an SSH or remote-directory error.
+- The `file_list_dir` Rust command remains the filesystem boundary: it canonicalizes the supplied
+  absolute directory and returns bounded metadata only. Do not grant the WebView a broad
+  `@tauri-apps/plugin-fs` scope or read local file bytes in the dialog.
+- All local path controls and accessibility labels use the shared i18n keys in both `zh-CN` and
+  `en-US`; changing the UI language must not change the selected local path or queue.
+- The local and remote headers reserve the same height so their list boundaries align; a long
+  listing scrolls inside its fixed viewport instead of expanding the dialog.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually verify Desktop defaults and
+listing on Windows/macOS, empty/unavailable directories, nested navigation, parent/root boundary,
+manual and native directory selection, refresh after a filesystem change, multiple file selection,
+duplicate suppression, upload progress, and language switching.
+
+### Common Mistake: Leaving `@monaco-editor/react` fully controlled
+
+**Symptom**: While the user types quickly in a config editor, the caret suddenly jumps to the last
+line of the document, or characters land out of order (typing `12345` yields `"124"35`). Reported
+against the provider common-configuration editor (issue #241 follow-up).
+
+**Root cause**: `@monaco-editor/react` synchronises a controlled `value` by comparing it with
+`editor.getValue()`; on any mismatch it replaces the **full model range** with
+`forceMoveMarkers: true`, which collapses the selection to the end of the document. Monaco emits
+content changes from its own DOM listeners, so `onChange` -> `setState` is a default-lane React
+update. When the tree is busy — `NativeProviderSettingsPage` polls failover state every second —
+React can commit props that lag the model by several keystrokes. Every lagging commit rewrites the
+whole document: the caret is pushed to the end, and a caret restored against pre-replacement
+content makes the following keystrokes land at the wrong offset, which is what scrambles the text
+(auto-closed quotes make the misplacement obvious).
+
+**Rules for provider config editors** (`NativeProviderCodeEditor`, shared by common config,
+provider-specific config, the full-document editor, effective-config preview and header/body
+overrides):
+
+- Pass `defaultValue`, never `value`, to `<Editor>`. The library's built-in sync must stay inert;
+  this component owns the sync policy.
+- Queue every value emitted from `onChange` in order. When an incoming prop matches a queued
+  emission, acknowledge up to that entry and **never write the model** — the model already holds
+  that text or newer text the user just typed. Matching by queue (not by "the previous value")
+  is required: React batching can skip intermediate values and the lag is not bounded to one
+  keystroke. Cap the queue so a consumer that normalises the value cannot grow it without bound.
+- Any genuine external replacement (refresh, save write-back, provider/document switch, generated
+  config) must save and restore selections plus `scrollTop` / `scrollLeft` around the edit. Monaco
+  clamps out-of-range selections, so restoring is safe after the content shrinks.
+- Use `model.pushEditOperations`, not `editor.executeEdits`: read-only editors block
+  `executeEdits`, and the read-only preview surfaces must still refresh without losing scroll.
+- Suppress the `onChange` callback while applying an external value, otherwise consumers that track
+  dirty state mark themselves dirty on every refresh.
+- Keep the `options` object and the change handler referentially stable. An unstable `onChange`
+  makes the library dispose and re-subscribe `onDidChangeModelContent` on every render, which the
+  one-second failover poll would otherwise trigger every second.
+- Reset the emitted-value queue when `path` changes: a new `path` means a new (or cached) model,
+  and stale echo bookkeeping would suppress a legitimate content write.
+
+`FileEditorContent` still uses the plain controlled pattern. It has the same latent behaviour and
+must adopt the same policy if caret jumps are reported there.
+
+**Tests**: `npx tsc --noEmit`; manually hold a key in a long common configuration to confirm the
+caret stays in place and the characters keep their order, then verify refresh / save / provider
+switch / document switch still reload content and keep the viewport.
+
+## Realtime statistics image export
+
+The live statistics panel marks its scroll content with `data-stats-screenshot-scroll`; screenshot/refresh actions carry `data-stats-screenshot-exclude`. Export the currently enabled cards at the current panel width, including content below the viewport, without changing live layout or scroll position. Hidden cards and closed dialogs stay excluded.
+
+Snapshot computed styles (including inherited theme variables) and canvas pixels synchronously before asynchronous rendering. Expand only the offscreen scroll clone, and remove its inert/aria-hidden host in `finally`. Do not point the renderer at the terminal, the whole window or a different session after a tab switch. Use a proportional pixel budget rather than cropping.
+
+Ordinary captures use at least a 2x pixel ratio and may follow high-density displays up to 3x. Dimension and total-pixel limits may proportionally reduce extreme long captures so the full panel remains present without exceeding the renderer budget.
+
+`statsScreenshot` lazily loads html-to-image; `statsScreenshotClipboard` uses Tauri `Image.new` with explicit RGBA dimensions and `writeImage`, then closes the native resource in `finally`. The only added permission is clipboard-manager write-image. No filesystem export, upload or clipboard read is needed. The button owns its in-flight guard, disables duplicate clicks and localizes all feedback.
+
+Tests: `node --test scripts/statsScreenshot.test.mjs`; `node scripts/statsScreenshot.browser.mjs` produces a standalone file fixture whose `statsScreenshotTests.runScreenshotRegression()` exercises dark/light themes, three scroll positions, SVG/canvas, snapshot stability and cleanup. This fixture does not start CLI-Manager services or Tauri. A human must still verify pasting the image from the actual desktop app and switching UI language.
+
+## Convention: Pi fullscreen TUI external advisories use the shared output transform
+
+**What**: Pi-specific text emitted by an external extension through the PTY must be handled in
+`TerminalPiCompatibility.transformOutput`, which is shared by live output, replay, and restored
+snapshots. The incremental helper shape is
+`createPiOutputFilter(): { transform(text: string): string; reset(): void }`.
+
+**Why**: Pi's fullscreen renderer owns its redraw surface, while an extension's `console.warn`
+still enters the PTY as ordinary stderr. xterm cannot recover the composer after that text is
+written at the current cursor position. Filtering the one known advisory at the existing Pi
+compatibility boundary preserves the PTY transport and the user's configured direct tools.
+
+**Contracts**:
+
+- Match the complete `pi-mcp-adapter` direct-tools advisory, including a count of 75 or more and
+  its `\n` or `\r\n` terminator; do not filter arbitrary `MCP:` text.
+- Keep only a bounded candidate suffix while a PTY frame splits the advisory, and release a
+  candidate as ordinary output when it stops matching.
+- Keep non-Pi sessions byte-for-byte unchanged and clear the candidate on compatibility reset.
+
+**Correct**:
+
+```typescript
+const transformed = piActive
+  ? ansiTransform.transform(outputFilter.transform(text))
+  : text;
+```
+
+**Wrong**:
+
+```typescript
+text = text.replace(/MCP:.*/, "");
+```
+
+**Tests**: Assert every split point of the advisory, repeated advisories, nearby ordinary text,
+below-threshold and malformed MCP text, non-Pi passthrough, and reset after a partial candidate.
+Also keep the source contract that live, replay, and restore paths call the shared transform.
