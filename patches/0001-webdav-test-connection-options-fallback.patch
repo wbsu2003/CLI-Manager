@@ -1,18 +1,19 @@
-diff --git a/src-tauri/src/webdav/mod.rs b/src-tauri/src/webdav/mod.rs
-index cfd90695..529b5991 100644
---- a/src-tauri/src/webdav/mod.rs
-+++ b/src-tauri/src/webdav/mod.rs
-@@ -97,20 +97,49 @@ impl WebDavClient {
+diff --git a/src-tauri/src/infrastructure/webdav/mod.rs b/src-tauri/src/infrastructure/webdav/mod.rs
+index 3450164..1092d71 100644
+--- a/src-tauri/src/infrastructure/webdav/mod.rs
++++ b/src-tauri/src/infrastructure/webdav/mod.rs
+@@ -87,22 +87,49 @@ impl WebDavClient {
+         }
      }
  
+-    // 向基础 URL 发送带认证的 OPTIONS，只以 HTTP 成功状态判断连接测试结果，不验证 DAV 能力。
++    // 部分服务(如群晖)不响应根路径的 OPTIONS 探活：先试 OPTIONS，非 2xx 回退 PROPFIND(Depth:0)再判一次。
      pub async fn test_connection(&self) -> Result<bool, WebDavError> {
 -        let url = self.config.url.trim_end_matches('/');
 +        let url = self.config.url.trim_end_matches('/').to_string();
 +        let auth = self.auth_header().to_string();
  
 -        let response = self
-+        // 部分 WebDAV 服务(如群晖)不响应根路径的 OPTIONS 探活。
-+        // 先试 OPTIONS;非 2xx 时回退 PROPFIND(Depth:0)再判一次,避免把「服务不认 OPTIONS」误报成「认证失败」。
 +        let options_resp = self
              .client
 -            .request(Method::OPTIONS, url)
@@ -56,4 +57,4 @@ index cfd90695..529b5991 100644
 +        })
      }
  
-     pub async fn exists(&self, remote_path: &str) -> Result<bool, WebDavError> {
+     // 拼接远端路径并发出 HEAD；任意非成功 HTTP 状态均返回 false，不区分不存在与权限失败。
