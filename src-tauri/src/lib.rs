@@ -31,21 +31,21 @@ pub(crate) use app::migrations::{
 #[cfg(test)]
 pub(crate) use app::migrations::{
     MIGRATION_ADD_NODE_APPEARANCE_VERSION, MIGRATION_ADD_SSH_CONFIG_FILE_SQL,
-    MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION, MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL,
     MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION,
     MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION,
     MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION, MIGRATION_CREATE_EXTENSION_SKILLS_SQL,
-    MIGRATION_CREATE_EXTENSION_SKILLS_VERSION, MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION,
-    MIGRATION_CREATE_MESSAGE_STARS_SQL, MIGRATION_CREATE_MESSAGE_STARS_VERSION,
+    MIGRATION_CREATE_EXTENSION_SKILLS_VERSION, MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION,
+    MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION, MIGRATION_CREATE_MESSAGE_STARS_SQL,
+    MIGRATION_CREATE_MESSAGE_STARS_VERSION, MIGRATION_CREATE_SSH_AGENT_INTEGRATIONS_SQL,
     MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
 };
 
+#[path = "infrastructure/process/agent_launcher.rs"]
+pub(crate) mod agent_launcher;
 #[path = "infrastructure/storage/app_paths.rs"]
 pub mod app_paths;
 #[path = "features/providers/ccswitch_db.rs"]
 mod ccswitch_db;
-#[path = "features/extensions/mod.rs"]
-pub(crate) mod extensions;
 #[path = "features/hooks/claude.rs"]
 mod claude_hook;
 #[path = "features/codex-proxy/mod.rs"]
@@ -53,20 +53,24 @@ pub mod codex_app_server_proxy;
 #[path = "features/statusline/codex.rs"]
 pub mod codex_statusline;
 mod commands;
-#[path = "infrastructure/process/agent_launcher.rs"]
-pub(crate) mod agent_launcher;
-#[path = "infrastructure/storage/legacy_remote_state.rs"]
-pub(crate) mod legacy_remote_state;
+#[path = "features/open_terminal.rs"]
+mod open_terminal;
 #[path = "infrastructure/process/conpty_sideload.rs"]
 mod conpty_sideload;
 #[path = "infrastructure/diagnostics/crash_reporter.rs"]
 mod crash_reporter;
 #[path = "infrastructure/storage/credential_store.rs"]
 pub(crate) mod credential_store;
+#[path = "features/extensions/mod.rs"]
+pub(crate) mod extensions;
+#[path = "infrastructure/storage/legacy_remote_state.rs"]
+pub(crate) mod legacy_remote_state;
 #[path = "infrastructure/storage/repo_operation.rs"]
 pub(crate) mod repo_operation;
 // daemon 二进制（src/bin/cli-manager-daemon.rs）经 lib 复用以下模块，
 // 因此 app_paths 与 daemon 需 pub。
+#[path = "features/hooks/codex_goal.rs"]
+mod codex_goal;
 #[path = "infrastructure/daemon/mod.rs"]
 pub mod daemon;
 pub mod device_identity;
@@ -76,8 +80,6 @@ mod file_watcher;
 mod git_watcher;
 #[path = "features/hooks/client.rs"]
 pub mod hook_client;
-#[path = "features/hooks/codex_goal.rs"]
-mod codex_goal;
 #[path = "infrastructure/system/linux_graphics.rs"]
 mod linux_graphics;
 #[path = "features/files/live_server/mod.rs"]
@@ -122,11 +124,11 @@ pub mod web_daemon;
 mod web_device_outbox;
 #[path = "infrastructure/webdav/mod.rs"]
 mod webdav;
-#[path = "infrastructure/process/wsl.rs"]
-mod wsl;
 #[cfg(target_os = "windows")]
 #[path = "shared/windows_command_line.rs"]
 mod windows_command_line;
+#[path = "infrastructure/process/wsl.rs"]
+mod wsl;
 
 use log::LevelFilter;
 use serde_json::Value;
@@ -155,6 +157,18 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 #[derive(Default)]
 struct PendingBackgroundSession(Mutex<Option<String>>);
+
+#[tauri::command]
+fn take_pending_open_terminal_requests(
+    pending: tauri::State<'_, open_terminal::PendingOpenTerminalRequests>,
+) -> Vec<String> {
+    open_terminal::take_pending(&pending)
+}
+
+#[tauri::command]
+fn set_windows_explorer_context_menu(enabled: bool) -> Result<(), String> {
+    open_terminal::set_windows_explorer_context_menu(enabled)
+}
 
 // 从相邻命令行参数中提取非空后台会话恢复目标。
 fn background_session_arg(args: &[String]) -> Option<String> {
@@ -382,6 +396,14 @@ pub fn run() {
             if let Some(session_id) = background_session_arg(&args) {
                 set_pending_background_session(app, session_id);
             }
+            let result = open_terminal::enqueue(app, open_terminal::parse_open_terminal_args(&args));
+            if result.dropped > 0 {
+                log::warn!(
+                    "dropped {} open-terminal request(s) because the queue is full",
+                    result.dropped
+                );
+            }
+            open_terminal::emit_request_event(app, &result.accepted);
             show_main_window(app);
         }))
         .plugin({
@@ -415,6 +437,16 @@ pub fn run() {
                 if let Ok(mut pending) = app.state::<PendingBackgroundSession>().0.lock() {
                     *pending = Some(session_id);
                 }
+            }
+            let result = open_terminal::enqueue(
+                &app.handle(),
+                open_terminal::parse_open_terminal_args(&startup_args),
+            );
+            if result.dropped > 0 {
+                log::warn!(
+                    "dropped {} open-terminal startup request(s) because the queue is full",
+                    result.dropped
+                );
             }
             if let Err(err) = app_paths::migrate_legacy_app_files(app.handle()) {
                 log::warn!("CLI-Manager data migration skipped: {err}");
@@ -558,6 +590,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .manage(PendingBackgroundSession::default())
+        .manage(open_terminal::PendingOpenTerminalRequests::default())
         .manage(daemon::client::DaemonBridge::new())
         .manage(file_watcher::FileWatcherBridge::new())
         .manage(git_watcher::GitWatcherBridge::new())
@@ -609,9 +642,9 @@ pub fn run() {
             commands::opencode_hook::opencode_hook_uninstall,
             commands::terminal::pty_prepare_create,
             commands::terminal::pty_reconcile_active_sessions,
-            commands::terminal::pty_status,
             commands::terminal::pty_daemon_active,
             commands::terminal::pty_daemon_shutdown_if_idle,
+            commands::terminal::pty_daemon_force_shutdown,
             commands::terminal::pty_host_get_endpoint,
             commands::terminal::pty_legacy_request,
             commands::terminal::pty_daemon_upgrade_if_idle,
@@ -620,6 +653,8 @@ pub fn run() {
             commands::app_data::app_inspect_data_dir,
             commands::app_data::app_prepare_data_dir_switch,
             take_pending_background_session,
+            take_pending_open_terminal_requests,
+            set_windows_explorer_context_menu,
             commands::desktop_pet::desktop_pet_catalog,
             commands::desktop_pet::desktop_pet_list_installed,
             commands::desktop_pet::desktop_pet_get_installed,
@@ -682,6 +717,7 @@ pub fn run() {
             commands::fs::file_search,
             commands::fs::file_search_content,
             commands::fs::file_read_text,
+            commands::fs::replay_patch::file_read_replay_patch,
             commands::fs::file_read_project_text,
             commands::fs::file_read_image,
             commands::fs::file_write_text,
@@ -700,6 +736,8 @@ pub fn run() {
             commands::deepseek::deepseek_tui_prepare_launch,
             commands::history::history_list_sessions,
             commands::history::history_get_session,
+            commands::history::detail_page::history_get_session_page,
+            commands::history::history_read_live_transcript,
             commands::history::history_convert_session,
             commands::history::history_delete_session,
             commands::history_edit::history_update_message,
@@ -1335,11 +1373,9 @@ mod provider_migration_tests {
         MIGRATION_BACKFILL_REQUEST_LOG_PROJECT_PATH_VERSION,
         MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION,
         MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION,
-        MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION,
-        MIGRATION_CREATE_EXTENSION_SKILLS_SQL,
+        MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION, MIGRATION_CREATE_EXTENSION_SKILLS_SQL,
         MIGRATION_CREATE_EXTENSION_SKILLS_VERSION,
-        MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION,
-        MIGRATION_CREATE_MESSAGE_STARS_VERSION,
+        MIGRATION_CREATE_HISTORY_GENERATED_TITLES_VERSION, MIGRATION_CREATE_MESSAGE_STARS_VERSION,
         MIGRATION_MATERIALIZE_REQUEST_LOG_PROJECT_PATH_VERSION,
     };
 
@@ -1459,9 +1495,7 @@ mod provider_migration_tests {
         assert!(project_path_mode_migration.version < ssh_attachment_root_migration.version);
         let extension_mcp_migration = registry
             .iter()
-            .find(|migration| {
-                migration.version == MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION
-            })
+            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_MCP_RESOURCES_VERSION)
             .expect("extension MCP migration must be registered");
         assert_eq!(extension_mcp_migration.version, 38);
         assert!(extension_mcp_migration
@@ -1479,7 +1513,10 @@ mod provider_migration_tests {
             MIGRATION_CREATE_EXTENSION_SKILLS_DESCRIPTION
         );
         assert!(extension_mcp_migration.version < extension_skill_migration.version);
-        assert_eq!(extension_skill_migration.sql, MIGRATION_CREATE_EXTENSION_SKILLS_SQL);
+        assert_eq!(
+            extension_skill_migration.sql,
+            MIGRATION_CREATE_EXTENSION_SKILLS_SQL
+        );
         assert!(extension_skill_migration
             .sql
             .contains("CREATE TABLE IF NOT EXISTS extension_skill_packages"));
@@ -1488,7 +1525,9 @@ mod provider_migration_tests {
             .contains("CREATE TABLE IF NOT EXISTS extension_skill_installations"));
         let scope_policy_migration = registry
             .iter()
-            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION)
+            .find(|migration| {
+                migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION
+            })
             .expect("extension scope policy migration must be registered");
         assert_eq!(scope_policy_migration.version, 40);
         assert!(extension_skill_migration.version < scope_policy_migration.version);
@@ -1515,15 +1554,21 @@ mod extension_scope_policy_migration_tests {
         let registry = migrations();
         let migration = registry
             .iter()
-            .find(|migration| migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION)
+            .find(|migration| {
+                migration.version == MIGRATION_CREATE_EXTENSION_SCOPE_POLICIES_VERSION
+            })
             .expect("extension scope policy migration must be registered");
         assert_eq!(migration.version, 40);
         assert_eq!(migration.description, "create_extension_scope_policies");
         assert!(migration
             .sql
             .contains("PRIMARY KEY (scope_kind, scope_id, cli, extension_kind)"));
-        assert!(migration.sql.contains("CHECK(mode IN ('inherit', 'custom'))"));
-        assert!(migration.sql.contains("REFERENCES projects(id) ON DELETE CASCADE"));
+        assert!(migration
+            .sql
+            .contains("CHECK(mode IN ('inherit', 'custom'))"));
+        assert!(migration
+            .sql
+            .contains("REFERENCES projects(id) ON DELETE CASCADE"));
     }
 }
 
@@ -1543,12 +1588,17 @@ mod message_star_migration_tests {
             .find(|migration| migration.version == MIGRATION_CREATE_MESSAGE_STARS_VERSION)
             .expect("message star migration must be registered");
         assert_eq!(migration.version, 41);
-        assert_eq!(migration.description, MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION);
+        assert_eq!(
+            migration.description,
+            MIGRATION_CREATE_MESSAGE_STARS_DESCRIPTION
+        );
         assert_eq!(migration.sql, MIGRATION_CREATE_MESSAGE_STARS_SQL);
         assert!(migration
             .sql
             .contains("CREATE TABLE IF NOT EXISTS message_stars"));
-        assert!(migration.sql.contains("PRIMARY KEY (session_key, message_index)"));
+        assert!(migration
+            .sql
+            .contains("PRIMARY KEY (session_key, message_index)"));
         assert!(migration
             .sql
             .contains("idx_message_stars_session ON message_stars(session_key)"));

@@ -9,6 +9,7 @@ import { backgroundImageExists } from "../platform/assetUrl";
 import { defaultShellForOs, getOsPlatform, isWindowsOnlyShellKey } from "../platform/shell";
 import { getCliManagerDataPaths } from "../platform/appPaths";
 import { singleFlight } from "../lib/singleFlight";
+import { debugConsoleWarn } from "../platform/debugConsole";
 import {
   DEFAULT_TERMINAL_INPUT_SUGGESTION_USAGE,
   TERMINAL_INPUT_SUGGESTION_AI_MODEL,
@@ -94,6 +95,9 @@ export type ViewMode = "standard" | "compact";
 export type GitDiffViewMode = "split" | "unified";
 export type GitDiffOpenMode = "dialog" | "editor";
 export type CloseBehavior = "ask" | "minimize" | "exit";
+
+/** 设置页图标风格：refined 为自绘彩色圆角砖，classic 恢复 lucide 线性图标。 */
+export type SettingsIconStyle = "classic" | "refined";
 /** 退出时存在运行中任务的处理方式：询问 / 后台继续 / 最小化到托盘 / 丢弃任务并退出。 */
 export type ExitWithRunningTasksBehavior = "ask" | "background" | "minimize" | "discard";
 /** 启动检测到可恢复终端标签时的恢复方式：启动时弹窗询问 / 静默自动恢复。 */
@@ -207,6 +211,7 @@ export type ShortcutAction =
   | "sessionHistory"
   | "copyAi"
   | "copyTerminalSelection"
+  | "scrollToTop"
   | "scrollToBottom"
   | "pageUp"
   | "pageDown"
@@ -266,6 +271,7 @@ const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "sessionHistory",
   "copyAi",
   "copyTerminalSelection",
+  "scrollToTop",
   "scrollToBottom",
   "pageUp",
   "pageDown",
@@ -327,6 +333,7 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutMap = {
   sessionHistory: "Ctrl+K",
   copyAi: "Alt+P",
   copyTerminalSelection: "Ctrl+Shift+C",
+  scrollToTop: "Ctrl+Home",
   scrollToBottom: "Ctrl+End",
   pageUp: "PageUp",
   pageDown: "PageDown",
@@ -394,6 +401,7 @@ export interface Settings {
   uiFontFamily: string;
   uiFontSize: number;
   uiTextColor: string;
+  settingsIconStyle: SettingsIconStyle;
   lastSettingsTab: LastSettingsTab;
   statuslineEditorSource: StatuslineEditorSource;
   defaultShell: string;
@@ -414,6 +422,7 @@ export interface Settings {
   sidebarDensity: SidebarDensity;
   sidebarProjectFilterVisible: boolean;
   viewMode: ViewMode;
+  windowsExplorerContextMenuEnabled: boolean;
   closeBehavior: CloseBehavior;
   exitWithRunningTasksBehavior: ExitWithRunningTasksBehavior;
   /** 退出检测是否把「已完成/失败」的 Claude/Codex 会话也算作可转入后台的任务（默认仅检测运行中）。 */
@@ -554,6 +563,7 @@ const DEFAULTS: Settings = {
     "\"Segoe UI Variable\", \"Segoe UI\", -apple-system, BlinkMacSystemFont, \"PingFang SC\", \"Microsoft YaHei\", sans-serif",
   uiFontSize: UI_FONT_SIZE_DEFAULT,
   uiTextColor: "",
+  settingsIconStyle: "refined",
   lastSettingsTab: "general",
   statuslineEditorSource: "claude",
   defaultShell: "powershell.exe",
@@ -580,6 +590,7 @@ const DEFAULTS: Settings = {
   sidebarDensity: "comfortable",
   sidebarProjectFilterVisible: false,
   viewMode: "standard",
+  windowsExplorerContextMenuEnabled: true,
   closeBehavior: "ask",
   exitWithRunningTasksBehavior: "ask",
   backgroundIncludeFinishedTasks: false,
@@ -1309,7 +1320,7 @@ async function applyDebugMode(enabled: boolean) {
     await invoke("set_debug_logging", { enabled });
   } catch (err) {
     if (enabled) {
-      console.warn("Failed to set debug logging:", err);
+      debugConsoleWarn("Failed to set debug logging:", err);
     }
   }
 }
@@ -1397,6 +1408,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     ) {
       entries.uiTextColor = DEFAULTS.uiTextColor;
       persistSetting("uiTextColor", DEFAULTS.uiTextColor);
+    }
+    const storedSettingsIconStyle = entries.settingsIconStyle;
+    const settingsIconStyle =
+      storedSettingsIconStyle === "classic" || storedSettingsIconStyle === "refined"
+        ? storedSettingsIconStyle
+        : DEFAULTS.settingsIconStyle;
+    entries.settingsIconStyle = settingsIconStyle;
+    if (storedSettingsIconStyle !== undefined && storedSettingsIconStyle !== settingsIconStyle) {
+      persistSetting("settingsIconStyle", settingsIconStyle);
     }
     const storedTerminalTextColor = entries.terminalTextColor;
     const terminalTextColor =
@@ -1875,7 +1895,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         await s.set("historyDetailSortDirections", next);
       })
       .catch((err) => {
-        console.warn("Failed to persist history detail sort directions:", err);
+        debugConsoleWarn("Failed to persist history detail sort directions:", err);
       });
   },
 

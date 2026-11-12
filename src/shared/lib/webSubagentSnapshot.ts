@@ -1,4 +1,5 @@
 import { parseTranscriptLines } from "./subagentTranscriptMessages";
+import { boundSubagentTranscript } from "./subagentTranscriptBuffer";
 import type { WebWorkspaceSnapshot } from "./webDevice";
 
 type Session = { id: string; title: string; kind?: string; subagent?: { parentSessionId: string; source?: { kind: string } } };
@@ -18,7 +19,8 @@ export function buildWebSubagentSnapshots(sessions: Session[], transcripts: Reco
     const original = transcript?.content ?? "";
     let cached = parseCache.get(session.id);
     if (!cached || cached.content !== original) {
-      const messages = parseTranscriptLines(original.slice(-2 * 1024 * 1024), 1, { toolCall: "", toolResult: "" }).messages;
+      const window = boundSubagentTranscript("", original, 2 * 1024 * 1024).content;
+      const messages = parseTranscriptLines(window, 1, { toolCall: "", toolResult: "" }).messages;
       cached = { content: original, total: messages.length, messages: messages.slice(-120) };
       parseCache.set(session.id, cached);
     }
@@ -27,7 +29,11 @@ export function buildWebSubagentSnapshots(sessions: Session[], transcripts: Reco
     let truncated = original.length > 2 * 1024 * 1024 || cached.total > 120;
     const lines: string[] = [];
     for (const message of parsed.slice(-120).reverse()) {
-      const encode = (text: string) => JSON.stringify({ type: "assistant", message: { role: message.role, content: text } }) + "\n";
+      const encode = (text: string) => JSON.stringify({
+        type: "assistant", message: { role: message.role, content: text },
+        cliManagerSubagent: { version: 1, sourceId: message.id,
+          kind: message.kind, actor: message.actor, phase: message.phase, timestamp: message.timestamp, notice: message.notice },
+      }) + "\n";
       let line = encode(message.text);
       if (encoder.encode(line).length > remaining) {
         truncated = true;
@@ -38,7 +44,8 @@ export function buildWebSubagentSnapshots(sessions: Session[], transcripts: Reco
           if (encoder.encode(encode(message.text.slice(-mid))).length <= remaining) low = mid;
           else high = mid - 1;
         }
-        line = encode(message.text.slice(-low));
+        line = encode(low > 0 ? message.text.slice(-low) : "");
+        if (encoder.encode(line).length > remaining) break;
       }
       remaining -= encoder.encode(line).length;
       lines.unshift(line);
